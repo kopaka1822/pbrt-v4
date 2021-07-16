@@ -71,7 +71,7 @@ else ()
 
   set_property (TARGET IexMath IlmThread Half
                 Iex Imath IlmImf HalfTest IexTest
-                IlmImfExamples IlmImfTest IlmImfUtil IlmImfUtilTest ImathTest
+                IlmImfTest IlmImfUtil IlmImfUtilTest ImathTest
                 PROPERTY FOLDER "ext/OpenEXR")
 
   set (OPENEXR_INCLUDE
