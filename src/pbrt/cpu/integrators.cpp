@@ -39,6 +39,7 @@
 #include <pbrt/util/spectrum.h>
 #include <pbrt/util/stats.h>
 #include <pbrt/util/string.h>
+#include <execution>
 
 namespace pbrt {
 
@@ -2776,6 +2777,8 @@ static bool ToGrid(const Point3f &p, const Bounds3f &bounds, const int gridRes[3
 
 // SPPM Method Definitions
 void SPPMIntegrator::Render() {
+    LOG_VERBOSE("Starting SPPM");
+
     // Initialize local variables for _SPPMIntegrator::Render()_
     if (Options->recordPixelStatistics)
         StatsEnablePixelStats(camera.GetFilm().PixelBounds(),
@@ -2813,6 +2816,9 @@ void SPPMIntegrator::Render() {
         ComputeRadicalInversePermutations(digitPermutationsSeed));
 
     for (int iter = 0; iter < nIterations; ++iter) {
+        LOG_VERBOSE("Iteration %d/%d", iter + 1, nIterations);
+        std::atomic<int> numVisiblePoints(0);
+
         // Connect to display server for SPPM if requested
         if (iter == 0 && !Options->displayServer.empty()) {
             DisplayDynamic(
@@ -2838,8 +2844,10 @@ void SPPMIntegrator::Render() {
                 ? film.SampleWavelengths(0.5)
                 : film.SampleWavelengths(RadicalInverse(1, iter));
 
+        auto timeStart = std::chrono::high_resolution_clock::now();
+        // Follow camera paths for _tileBounds_ in image for SPPM
         ParallelFor2D(pixelBounds, [&](Bounds2i tileBounds) {
-            // Follow camera paths for _tileBounds_ in image for SPPM
+            int localNumVisiblePoints = 0; // hread local variable
             ScratchBuffer &scratchBuffer = threadScratchBuffers[ThreadIndex];
             Sampler sampler = threadSamplers[ThreadIndex];
             for (Point2i pPixel : tileBounds) {
@@ -2937,6 +2945,9 @@ void SPPMIntegrator::Render() {
                         pixel.vp = {isect.p(), wo, bsdf, beta,
                                     lambda.SecondaryTerminated()};
                         haveSetVisiblePoint = true;
+                        //++numVisiblePoints;
+                        ++localNumVisiblePoints;
+                        // TODO why not stop the ray here?
                     }
 
                     // Spawn ray from SPPM camera path vertex
@@ -2962,12 +2973,116 @@ void SPPMIntegrator::Render() {
                     prevIntrCtx = LightSampleContext(isect);
                 }
             }
+            numVisiblePoints += localNumVisiblePoints; // update global count
         });
         progress.Update();
+        auto timeCreateGridStart = std::chrono::high_resolution_clock::now();
+
+        // acceleration structure for SPPM visible points
+        class SPPMDefaultHashGrid {
+        public:
+            SPPMDefaultHashGrid(int nPixels)
+                : grid(NextPrime(nPixels))
+            {}
+
+            void insert(Point3i gridIndex, SPPMPixelListNode *node) {
+                ++entryCount;
+                auto h = Hash(gridIndex) % grid.size();
+                CHECK_GE(h, 0);
+                node->next = grid[h];
+                // Note: on failure => loads actual value of grid[h] into node->next
+                while (!grid[h].compare_exchange_weak(node->next, node));
+            }
+
+            void optimize() {}
+
+            void for_each(Point3i gridIndex, std::function<void(SPPMPixelListNode*)> func) {
+                auto h = Hash(gridIndex) % grid.size();
+                CHECK_GE(h, 0);
+
+                for (SPPMPixelListNode *node = grid[h].load(std::memory_order_relaxed); node; node = node->next) {
+                    func(node);
+                }
+            }
+
+            size_t entry_count() const { return entryCount; }
+            size_t hash_table_size() const { return grid.size(); }
+
+        private:
+            std::vector<std::atomic<SPPMPixelListNode *>> grid;
+            std::atomic<size_t> entryCount = 0;
+        };
+        class SPPMOffsetHashGrid {
+            struct Entry {
+                uint64_t hash;
+                SPPMPixelListNode* node;
+            };
+        public:
+            SPPMOffsetHashGrid(int nPixels)
+                :
+            count(0),
+            values(nPixels * 4096 / sizeof(SPPMPixelListNode)), // generous oversetimation of the required budget
+            offsets(NextPrime(nPixels))
+            {}
+
+            void insert(Point3i gridIndex, SPPMPixelListNode *node) {
+                Entry e;
+                e.hash = Hash(gridIndex) % offsets.size();
+                e.node = node;
+                auto idx = count++;
+                values[idx] = e;
+            }
+
+            void optimize() {
+                values.resize(count); // resize values to actual entry count
+                // sort according to hash
+                std::sort(std::execution::par_unseq, values.begin(), values.end(), [](const Entry& left, const Entry& right)
+                {
+                    return left.hash < right.hash;
+                });
+
+                // init offsets
+                auto cur = values.begin();
+                const auto end = values.end();
+                uint32_t count = 0;
+                for(size_t curHash = 0; curHash < offsets.size(); ++curHash) {
+                    while (cur != end && cur->hash == curHash) {
+                        ++cur; ++count;
+                    }
+                    offsets[curHash] = count;
+                }
+            }
+
+            void for_each(Point3i gridIndex, std::function<void(SPPMPixelListNode *)> func) {
+                auto h = Hash(gridIndex) % offsets.size();
+                CHECK_GE(h, 0);
+
+                for (auto cur = values.begin() + start_index(h), 
+                    end = values.begin() + end_index(h);
+                    cur != end; ++cur) {
+                    func(cur->node);
+                }
+            }
+
+            size_t entry_count() const { return count; }
+            size_t hash_table_size() const { return offsets.size(); }
+
+            size_t start_index(uint64_t hash) const {return hash == 0 ? 0 : offsets[hash - 1];}
+            size_t end_index(uint64_t hash) const {return offsets[hash];}
+        private:
+            std::atomic<uint32_t> count;
+            std::vector<Entry> values;
+            std::vector<uint32_t> offsets;
+        };
+
+        //using SPPMAccelStruct = SPPMDefaultHashGrid;
+        using SPPMAccelStruct = SPPMOffsetHashGrid;
+
         // Create grid of all SPPM visible points
         // Allocate grid for SPPM visible points
-        int hashSize = NextPrime(nPixels);
-        std::vector<std::atomic<SPPMPixelListNode *>> grid(hashSize);
+        // TODO create hash grid here
+        LOG_VERBOSE("Creating visible points structure for %d visible points", numVisiblePoints.load());
+        SPPMAccelStruct visiblePoints(nPixels);
 
         // Compute grid bounds for SPPM visible points
         Bounds3f gridBounds;
@@ -3005,17 +3120,13 @@ void SPPMIntegrator::Render() {
                         for (int y = pMin.y; y <= pMax.y; ++y)
                             for (int x = pMin.x; x <= pMax.x; ++x) {
                                 // Add visible point to grid cell $(x, y, z)$
-                                int h = Hash(Point3i(x, y, z)) % hashSize;
-                                CHECK_GE(h, 0);
                                 SPPMPixelListNode *node =
                                     scratchBuffer.Alloc<SPPMPixelListNode>();
                                 node->pixel = &pixel;
 
                                 // Atomically add _node_ to the start of _grid[h]_'s
                                 // linked list
-                                node->next = grid[h];
-                                while (!grid[h].compare_exchange_weak(node->next, node))
-                                    ;
+                                visiblePoints.insert({x,y,z}, node);
                             }
                     gridCellsPerVisiblePoint << (1 + pMax.x - pMin.x) *
                                                     (1 + pMax.y - pMin.y) *
@@ -3024,12 +3135,27 @@ void SPPMIntegrator::Render() {
             }
         });
 
+        // optimize grid representation for future queries
+        visiblePoints.optimize();
+
+        auto timeCreateGridEnd = std::chrono::high_resolution_clock::now();
+
+        { // Print some stats from the grid
+            float mult = visiblePoints.entry_count() / (float)numVisiblePoints;
+            float loadFactor =
+                visiblePoints.entry_count() /
+                (float)visiblePoints.hash_table_size();
+
+            LOG_VERBOSE("Shooting Photons. Grid contains %d entries (%f more than visible points). Load factor is: %f", 
+                visiblePoints.entry_count(), mult, loadFactor);   
+        }
+
         // Trace photons and accumulate contributions
         // Create per-thread scratch buffers for photon shooting
         std::vector<ScratchBuffer> photonShootScratchBuffers;
         for (int i = 0; i < MaxThreadIndex(); ++i)
             photonShootScratchBuffers.push_back(ScratchBuffer(65536));
-
+             
         ParallelFor(0, photonsPerIteration, [&](int64_t start, int64_t end) {
             // Follow photon paths for photon index range _start_ - _end_
             ScratchBuffer &scratchBuffer = photonShootScratchBuffers[ThreadIndex];
@@ -3096,17 +3222,14 @@ void SPPMIntegrator::Render() {
                         // Add photon contribution to nearby visible points
                         Point3i photonGridIndex;
                         if (ToGrid(isect.p(), gridBounds, gridRes, &photonGridIndex)) {
-                            int h = Hash(photonGridIndex) % hashSize;
-                            CHECK_GE(h, 0);
                             // Add photon contribution to visible points in _grid[h]_
-                            for (SPPMPixelListNode *node =
-                                     grid[h].load(std::memory_order_relaxed);
-                                 node; node = node->next) {
+                            visiblePoints.for_each(photonGridIndex, [&](SPPMPixelListNode* node)
+                            {
                                 ++visiblePointsChecked;
                                 SPPMPixel &pixel = *node->pixel;
-                                if (DistanceSquared(pixel.vp.p, isect.p()) >
-                                    Sqr(pixel.radius))
-                                    continue;
+                                if (DistanceSquared(pixel.vp.p, isect.p()) > Sqr(pixel.radius)) 
+                                    return; // continue with next
+                                
                                 // Update _pixel_ $\Phi$ and $m$ for nearby photon
                                 Vector3f wi = -photonRay.d;
                                 SampledSpectrum Phi =
@@ -3120,7 +3243,7 @@ void SPPMIntegrator::Render() {
                                     pixel.Phi_i[i].Add(Phi_i[i]);
 
                                 ++pixel.m;
-                            }
+                            });
                         }
                     }
                     // Sample new photon ray direction
@@ -3155,6 +3278,22 @@ void SPPMIntegrator::Render() {
                 scratchBuffer.Reset();
             }
         });
+
+        auto timeEnd = std::chrono::high_resolution_clock::now();
+
+        { // print stats from current iteration
+            using fsec = std::chrono::duration<float>;
+
+            float sCamera =
+                std::chrono::duration_cast<fsec>(timeCreateGridStart - timeStart).count();
+            float sGrid =
+                std::chrono::duration_cast<fsec>(timeCreateGridEnd - timeCreateGridStart)
+                    .count();
+            float sPhotons =
+                std::chrono::duration_cast<fsec>(timeEnd - timeCreateGridEnd).count();
+            LOG_VERBOSE("Iteration %d stats: camera rays: %fs\t grid init: %fs\t photons: %fs\t total: %fs", iter + 1, sCamera, sGrid, sPhotons, sCamera + sGrid + sPhotons);
+        }
+
         // Reset _threadScratchBuffers_ after tracing photons
         for (ScratchBuffer &scratchBuffer : threadScratchBuffers)
             scratchBuffer.Reset();
