@@ -2978,6 +2978,13 @@ void SPPMIntegrator::Render() {
         progress.Update();
         auto timeCreateGridStart = std::chrono::high_resolution_clock::now();
 
+        struct SPPMGridStats {
+            uint32_t max; // max list length
+            uint32_t median; // median (non-empty) list length
+            float empty; // percentage of empty cells
+            float average; // average list length
+        };
+
         // acceleration structure for SPPM visible points
         class SPPMDefaultHashGrid {
         public:
@@ -3003,6 +3010,35 @@ void SPPMIntegrator::Render() {
                 for (SPPMPixelListNode *node = grid[h].load(std::memory_order_relaxed); node; node = node->next) {
                     func(node);
                 }
+            }
+
+            SPPMGridStats calc_stats() const {
+                SPPMGridStats stats;
+                stats.max = 0;
+                stats.median = 0;
+                uint32_t empty = 0;
+                std::vector<uint32_t> medianList;
+                medianList.reserve(grid.size());
+
+                for (const auto& g : grid) {
+                    uint32_t cur = 0;
+                    for (SPPMPixelListNode *node = g.load(std::memory_order_relaxed); node; node = node->next) {
+                        ++cur;
+                    }
+                    stats.max = std::max(cur, stats.max);
+                    if (cur == 0) ++empty;
+                    else medianList.push_back(cur);
+                }
+
+                stats.empty = empty / (float)grid.size();
+                stats.average = entry_count() / (float)grid.size();
+                if (!medianList.empty()) {
+                    auto mid = medianList.begin() + medianList.size() / 2;
+                    std::nth_element(medianList.begin(), mid, medianList.end());
+                    stats.median = medianList[medianList.size() / 2];
+                }
+                
+                return stats;
             }
 
             size_t entry_count() const { return entryCount; }
@@ -3069,6 +3105,34 @@ void SPPMIntegrator::Render() {
 
             size_t start_index(uint64_t hash) const {return hash == 0 ? 0 : offsets[hash - 1];}
             size_t end_index(uint64_t hash) const {return offsets[hash];}
+
+            SPPMGridStats calc_stats() const {
+                SPPMGridStats stats;
+                stats.max = 0;
+                stats.median = 0;
+                uint32_t empty = 0;
+                std::vector<uint32_t> medianList;
+                medianList.reserve(offsets.size());
+                
+                uint32_t prevOffset = 0;
+                for (const auto offset : offsets) {
+                    auto cur = offset - prevOffset;
+                    stats.max = std::max(stats.max, cur);
+                    if (cur == 0) ++empty;
+                    else medianList.push_back(cur);
+                    prevOffset = offset;
+                }
+
+                stats.empty = empty / (float)hash_table_size();
+                stats.average = entry_count() / (float)hash_table_size();
+                if (!medianList.empty()) {
+                    auto mid = medianList.begin() + medianList.size() / 2;
+                    std::nth_element(medianList.begin(), mid, medianList.end());
+                    stats.median = medianList[medianList.size() / 2];
+                }
+
+                return stats;
+            }
         private:
             std::atomic<uint32_t> count;
             std::vector<Entry> values;
@@ -3291,7 +3355,11 @@ void SPPMIntegrator::Render() {
                     .count();
             float sPhotons =
                 std::chrono::duration_cast<fsec>(timeEnd - timeCreateGridEnd).count();
+
+            auto stats = visiblePoints.calc_stats();
+
             LOG_VERBOSE("Iteration %d stats: camera rays: %fs\t grid init: %fs\t photons: %fs\t total: %fs", iter + 1, sCamera, sGrid, sPhotons, sCamera + sGrid + sPhotons);
+            LOG_VERBOSE("Iteration %d grid stats: max length %d\t median length %d\t avg length %f\t empty %f", iter + 1, stats.max, stats.median, stats.average, stats.empty);
         }
 
         // Reset _threadScratchBuffers_ after tracing photons
