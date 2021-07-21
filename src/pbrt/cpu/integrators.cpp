@@ -40,6 +40,8 @@
 #include <pbrt/util/stats.h>
 #include <pbrt/util/string.h>
 #include <execution>
+#include <set>
+#include <map>
 
 namespace pbrt {
 
@@ -2760,13 +2762,14 @@ struct SPPMPixel {
 struct SPPMPixelListNode {
     SPPMPixel *pixel;
     SPPMPixelListNode *next;
+    Point3i ipos;
 };
 
 // SPPM Utility Functions
 static bool ToGrid(const Point3f &p, const Bounds3f &bounds, const int gridRes[3],
                    Point3i *pi) {
     bool inBounds = true;
-    Vector3f pg = bounds.Offset(p);
+    Vector3f pg = bounds.Offset(p); // offset transforms into [0,1] coordinates
     for (int i = 0; i < 3; ++i) {
         (*pi)[i] = (int)(gridRes[i] * pg[i]);
         inBounds &= (*pi)[i] >= 0 && (*pi)[i] < gridRes[i];
@@ -2983,13 +2986,21 @@ void SPPMIntegrator::Render() {
             uint32_t median; // median (non-empty) list length
             float empty; // percentage of empty cells
             float average; // average list length
+            uint32_t used; // number of used slots
+            // stats without hashing
+            uint32_t actualMax;
+            uint32_t actualMedian;
+            uint32_t actualUsed;
         };
 
         // acceleration structure for SPPM visible points
         class SPPMDefaultHashGrid {
         public:
-            SPPMDefaultHashGrid(int nPixels)
-                : grid(NextPrime(nPixels))
+            SPPMDefaultHashGrid(int nPixels, Bounds3f gridBounds, int gridRes[3])
+                :
+            grid(NextPrime(nPixels)),
+            gridBounds(gridBounds),
+            gridRes{gridRes[0], gridRes[1], gridRes[2]}
             {}
 
             void insert(Point3i gridIndex, SPPMPixelListNode *node) {
@@ -2997,6 +3008,7 @@ void SPPMIntegrator::Render() {
                 auto h = Hash(gridIndex) % grid.size();
                 CHECK_GE(h, 0);
                 node->next = grid[h];
+                node->ipos = gridIndex; // extra info for stats
                 // Note: on failure => loads actual value of grid[h] into node->next
                 while (!grid[h].compare_exchange_weak(node->next, node));
             }
@@ -3016,18 +3028,31 @@ void SPPMIntegrator::Render() {
                 SPPMGridStats stats;
                 stats.max = 0;
                 stats.median = 0;
+                stats.used = 0;
                 uint32_t empty = 0;
                 std::vector<uint32_t> medianList;
                 medianList.reserve(grid.size());
+                // count number of actual different hash position
+                std::map<Point3i, uint32_t> positions;
 
                 for (const auto& g : grid) {
                     uint32_t cur = 0;
                     for (SPPMPixelListNode *node = g.load(std::memory_order_relaxed); node; node = node->next) {
+                        Point3i hashPoint = node->ipos;
+                        auto it = positions.find(hashPoint);
+                        if (it == positions.end())
+                            positions[hashPoint] = 1;
+                        else
+                            ++it->second;
                         ++cur;
                     }
                     stats.max = std::max(cur, stats.max);
                     if (cur == 0) ++empty;
-                    else medianList.push_back(cur);
+                    else
+                    {
+                        ++stats.used;
+                        medianList.push_back(cur);
+                    }
                 }
 
                 stats.empty = empty / (float)grid.size();
@@ -3036,6 +3061,21 @@ void SPPMIntegrator::Render() {
                     auto mid = medianList.begin() + medianList.size() / 2;
                     std::nth_element(medianList.begin(), mid, medianList.end());
                     stats.median = medianList[medianList.size() / 2];
+                }
+
+                medianList.resize(0);
+                stats.actualMax = 0;
+                stats.actualUsed = 0;
+                for (const auto &p : positions) {
+                    auto count = p.second;
+                    stats.actualMax = std::max(stats.actualMax, count);
+                    medianList.push_back(count);
+                    ++stats.actualUsed;
+                }
+                if (!medianList.empty()) {
+                    auto mid = medianList.begin() + medianList.size() / 2;
+                    std::nth_element(medianList.begin(), mid, medianList.end());
+                    stats.actualMedian = medianList[medianList.size() / 2];
                 }
                 
                 return stats;
@@ -3047,6 +3087,8 @@ void SPPMIntegrator::Render() {
         private:
             std::vector<std::atomic<SPPMPixelListNode *>> grid;
             std::atomic<size_t> entryCount = 0;
+            Bounds3f gridBounds;
+            int gridRes[3];
         };
         class SPPMOffsetHashGrid {
             struct Entry {
@@ -3139,15 +3181,12 @@ void SPPMIntegrator::Render() {
             std::vector<uint32_t> offsets;
         };
 
-        //using SPPMAccelStruct = SPPMDefaultHashGrid;
-        using SPPMAccelStruct = SPPMOffsetHashGrid;
+        using SPPMAccelStruct = SPPMDefaultHashGrid;
+        //using SPPMAccelStruct = SPPMOffsetHashGrid;
 
         // Create grid of all SPPM visible points
         // Allocate grid for SPPM visible points
-        // TODO create hash grid here
-        LOG_VERBOSE("Creating visible points structure for %d visible points", numVisiblePoints.load());
-        SPPMAccelStruct visiblePoints(nPixels);
-
+        
         // Compute grid bounds for SPPM visible points
         Bounds3f gridBounds;
         Float maxRadius = 0;
@@ -3164,8 +3203,16 @@ void SPPMIntegrator::Render() {
         Vector3f diag = gridBounds.Diagonal();
         Float maxDiag = MaxComponentValue(diag);
         int baseGridRes = int(maxDiag / maxRadius);
+        
         for (int i = 0; i < 3; ++i)
             gridRes[i] = std::max<int>(baseGridRes * diag[i] / maxDiag, 1);
+
+        LOG_VERBOSE("baseGridRes: %d. Grid Res: [%d, %d, %d]", baseGridRes, gridRes[0],
+                    gridRes[1], gridRes[2]);
+
+        LOG_VERBOSE("Creating visible points structure for %d visible points",
+                    numVisiblePoints.load());
+        SPPMAccelStruct visiblePoints(nPixels, gridBounds, gridRes);
 
         // Add visible points to SPPM grid
         ParallelFor2D(pixelBounds, [&](Bounds2i tileBounds) {
@@ -3346,6 +3393,7 @@ void SPPMIntegrator::Render() {
         auto timeEnd = std::chrono::high_resolution_clock::now();
 
         { // print stats from current iteration
+             LOG_VERBOSE("calcing stats...");
             using fsec = std::chrono::duration<float>;
 
             float sCamera =
@@ -3359,7 +3407,9 @@ void SPPMIntegrator::Render() {
             auto stats = visiblePoints.calc_stats();
 
             LOG_VERBOSE("Iteration %d stats: camera rays: %fs\t grid init: %fs\t photons: %fs\t total: %fs", iter + 1, sCamera, sGrid, sPhotons, sCamera + sGrid + sPhotons);
-            LOG_VERBOSE("Iteration %d grid stats: max length %d\t median length %d\t avg length %f\t empty %f", iter + 1, stats.max, stats.median, stats.average, stats.empty);
+            LOG_VERBOSE("Iteration %d grid stats: max length: %d\t median length %d\t occupied slots: %d/%d", iter + 1, stats.actualMax, stats.actualMedian, stats.actualUsed, gridRes[0] * gridRes[1] * gridRes[2]);
+            LOG_VERBOSE("Iteration %d hash grid stats: max length %d\t median length %d\t avg length %f\t empty %f\t occupied slots: %d/%d", iter + 1, stats.max, stats.median, stats.average, stats.empty, stats.used, visiblePoints.hash_table_size());
+            
         }
 
         // Reset _threadScratchBuffers_ after tracing photons

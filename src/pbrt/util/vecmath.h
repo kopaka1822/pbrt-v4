@@ -715,6 +715,17 @@ class Point3 : public Tuple3<Point3, T> {
         DCHECK(!p.HasNaN());
         return {x - p.x, y - p.y, z - p.z};
     }
+
+    // operator used for ordered maps/sets
+    bool operator<(Point3<T> p) const {
+        DCHECK(!p.HasNaN());
+        if (x < p.x) return true;
+        if (x > p.x) return false;
+        if (y < p.y) return true;
+        if (y > p.y) return false;
+        if (z < p.z) return true;
+        return false;
+    }
 };
 
 // Point2* Definitions
