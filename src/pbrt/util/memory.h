@@ -71,7 +71,7 @@ class alignas(PBRT_L1_CACHE_LINE_SIZE) ScratchBuffer {
   public:
     // ScratchBuffer Public Methods
     ScratchBuffer() = default;
-    ScratchBuffer(int size) : allocatedBytes(size) {
+    ScratchBuffer(size_t size) : allocatedBytes(size) {
         ptr = (uint8_t *)Allocator().allocate_bytes(size, align);
     }
 
@@ -130,7 +130,7 @@ class alignas(PBRT_L1_CACHE_LINE_SIZE) ScratchBuffer {
     // ScratchBuffer Private Members
     static constexpr int align = PBRT_L1_CACHE_LINE_SIZE;
     uint8_t *ptr = nullptr;
-    int allocatedBytes = 0, offset = 0;
+    size_t allocatedBytes = 0, offset = 0;
 };
 
 }  // namespace pbrt

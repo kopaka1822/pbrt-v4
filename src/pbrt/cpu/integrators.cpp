@@ -2794,6 +2794,10 @@ void SPPMIntegrator::Render() {
     Bounds2i pixelBounds = film.PixelBounds();
     int nPixels = pixelBounds.Area();
 
+    int gridResolutionScale = 2;
+
+    LOG_VERBOSE("nPixels: %d", nPixels);
+
     // Initialize _pixels_ array for SPPM
     CHECK(!pixelBounds.IsEmpty());
     Array2D<SPPMPixel> pixels(pixelBounds);
@@ -2807,9 +2811,12 @@ void SPPMIntegrator::Render() {
 
     // Allocate per-thread _ScratchBuffer_s for SPPM rendering
     std::vector<ScratchBuffer> threadScratchBuffers;
+    size_t allocSize = size_t(nPixels) * 4096ul / size_t(MaxThreadIndex()) * size_t(gridResolutionScale) * size_t(gridResolutionScale);
+    LOG_VERBOSE("scratch memory: %lu x %d", allocSize, MaxThreadIndex());
     for (int i = 0; i < MaxThreadIndex(); ++i) {
-        size_t allocSize = nPixels * 4096 / MaxThreadIndex();
+        
         threadScratchBuffers.push_back(ScratchBuffer(allocSize));
+        CHECK_NE(threadScratchBuffers.data(), nullptr);
     }
 
     // Allocate samplers for SPPM rendering
@@ -3077,7 +3084,29 @@ void SPPMIntegrator::Render() {
                     std::nth_element(medianList.begin(), mid, medianList.end());
                     stats.actualMedian = medianList[medianList.size() / 2];
                 }
-                
+
+                /*
+                // write grid to debug
+                pstd::vector<float> pixels;
+                pixels.reserve(gridRes[0] * gridRes[1]);
+                for (int z = 0; z < gridRes[2]; ++z) {
+                    LOG_VERBOSE("writing grid %d/%d", z, gridRes[2]);
+                    pixels.resize(0);
+                    for (int y = 0; y < gridRes[1]; ++y)
+                        for (int x = 0; x < gridRes[0]; ++x) {
+                            Point3i hashPoint = Point3i{x, y, z};
+                            float val = 0.0f;
+                            auto it = positions.find(hashPoint);
+                            if (it != positions.end()) val = (float)it->second;
+                            pixels.push_back(val);
+                        }
+
+                    Image image(pixels, Point2i{gridRes[0], gridRes[1]}, {"R"});
+                    auto filename = "Layer" + std::to_string(z) + ".exr";
+                    if (!image.Write(filename))
+                        LOG_ERROR("could not write %s", filename.c_str());
+                }
+                */
                 return stats;
             }
 
@@ -3200,15 +3229,16 @@ void SPPMIntegrator::Render() {
 
         // Compute resolution of SPPM grid in each dimension
         int gridRes[3];
-        Vector3f diag = gridBounds.Diagonal();
-        Float maxDiag = MaxComponentValue(diag);
-        int baseGridRes = int(maxDiag / maxRadius);
+        const Vector3f gridLength = gridBounds.Diagonal();
+        Float maxDiag = MaxComponentValue(gridLength);
+        int baseGridRes = int(maxDiag / maxRadius) * gridResolutionScale;
         
         for (int i = 0; i < 3; ++i)
-            gridRes[i] = std::max<int>(baseGridRes * diag[i] / maxDiag, 1);
+            gridRes[i] = std::max<int>(baseGridRes * gridLength[i] / maxDiag, 1);
 
-        LOG_VERBOSE("baseGridRes: %d. Grid Res: [%d, %d, %d]", baseGridRes, gridRes[0],
-                    gridRes[1], gridRes[2]);
+        const Vector3f invGridRes = Vector3f(1.0f / gridRes[0], 1.0f / gridRes[1], 1.0f / gridRes[2]);
+        LOG_VERBOSE("baseGridRes: %d. Grid Res: [%d, %d, %d]. Max Radius: %f. Grid Cell Size [%.3f, %.3f, %.3f]", baseGridRes, gridRes[0], gridRes[1], gridRes[2], maxRadius,
+                    gridLength[0] / gridRes[0], gridLength[1] / gridRes[1], gridLength[2] / gridRes[2]);
 
         LOG_VERBOSE("Creating visible points structure for %d visible points",
                     numVisiblePoints.load());
@@ -3222,7 +3252,8 @@ void SPPMIntegrator::Render() {
                 if (pixel.vp.beta) {
                     // Add pixel's visible point to applicable grid cells
                     // Find grid cell bounds for pixel's visible point, _pMin_ and _pMax_
-                    Float r = pixel.radius;
+                    const Float r = pixel.radius;
+                    const Float r2 = pixel.radius * pixel.radius;
                     Point3i pMin, pMax;
                     ToGrid(pixel.vp.p - Vector3f(r, r, r), gridBounds, gridRes, &pMin);
                     ToGrid(pixel.vp.p + Vector3f(r, r, r), gridBounds, gridRes, &pMax);
@@ -3230,6 +3261,30 @@ void SPPMIntegrator::Render() {
                     for (int z = pMin.z; z <= pMax.z; ++z)
                         for (int y = pMin.y; y <= pMax.y; ++y)
                             for (int x = pMin.x; x <= pMax.x; ++x) {
+                                Point3i gridPoint = { x, y, z };
+                                
+                                #if 1
+                                // test if sphere intersects with grid bounding box
+                                Bounds3f cell;
+                                for (int i = 0; i < 3; ++i)
+                                {
+                                    cell.pMin[i] = gridBounds.pMin[i] + gridLength[i] * gridPoint[i] * invGridRes[i];
+                                    cell.pMax[i] = gridBounds.pMin[i] + gridLength[i] * (gridPoint[i] + 1) * invGridRes[i];
+                                }
+
+                                // test if cell intersects sphere (modified https://stackoverflow.com/questions/28343716/sphere-intersection-test-of-aabb)
+                                float dmin = 0.0f;
+                                for (int i = 0; i < 3; ++i)
+                                {
+                                    const auto distMin = pixel.vp.p[i] - cell.pMin[i];
+                                    if (distMin < 0.0f) dmin += distMin * distMin;
+                                    const auto distMax = pixel.vp.p[i] - cell.pMax[i];
+                                    if (distMax > 0.0f) dmin += distMax * distMax;
+                                }
+                                bool isIntersection = dmin <= r2;
+                                if(!isIntersection) continue;
+                                #endif
+
                                 // Add visible point to grid cell $(x, y, z)$
                                 SPPMPixelListNode *node =
                                     scratchBuffer.Alloc<SPPMPixelListNode>();
@@ -3237,7 +3292,7 @@ void SPPMIntegrator::Render() {
 
                                 // Atomically add _node_ to the start of _grid[h]_'s
                                 // linked list
-                                visiblePoints.insert({x,y,z}, node);
+                                visiblePoints.insert(gridPoint, node);
                             }
                     gridCellsPerVisiblePoint << (1 + pMax.x - pMin.x) *
                                                     (1 + pMax.y - pMin.y) *
@@ -3266,11 +3321,21 @@ void SPPMIntegrator::Render() {
         std::vector<ScratchBuffer> photonShootScratchBuffers;
         for (int i = 0; i < MaxThreadIndex(); ++i)
             photonShootScratchBuffers.push_back(ScratchBuffer(65536));
-             
+        
+        using high_res_duration = std::chrono::duration<long long, std::ratio<1, 1000000000>>;
+        std::atomic<long long> timePhotonDuration(0l);
+        std::atomic<long long> timePhotonGridDuration(0l);
+        std::atomic<long long> timePhotonColorDuration(0l);
+
         ParallelFor(0, photonsPerIteration, [&](int64_t start, int64_t end) {
             // Follow photon paths for photon index range _start_ - _end_
             ScratchBuffer &scratchBuffer = photonShootScratchBuffers[ThreadIndex];
             Sampler sampler = threadSamplers[ThreadIndex];
+            auto photonTimeStart = std::chrono::high_resolution_clock::now();
+            //std::chrono::milliseconds gridTimeSum;
+            long long gridTimeSum(0l);
+            long long gridPhotonColorCum(0l);
+
             for (int64_t photonIndex = start; photonIndex < end; ++photonIndex) {
                 // Follow photon path for _photonIndex_
                 // Define sampling lambda functions for photon shooting
@@ -3334,6 +3399,7 @@ void SPPMIntegrator::Render() {
                         Point3i photonGridIndex;
                         if (ToGrid(isect.p(), gridBounds, gridRes, &photonGridIndex)) {
                             // Add photon contribution to visible points in _grid[h]_
+                            auto gridTimeStart = std::chrono::high_resolution_clock::now();
                             visiblePoints.for_each(photonGridIndex, [&](SPPMPixelListNode* node)
                             {
                                 ++visiblePointsChecked;
@@ -3341,6 +3407,8 @@ void SPPMIntegrator::Render() {
                                 if (DistanceSquared(pixel.vp.p, isect.p()) > Sqr(pixel.radius)) 
                                     return; // continue with next
                                 
+                                auto gridColorStart = std::chrono::high_resolution_clock::now();
+
                                 // Update _pixel_ $\Phi$ and $m$ for nearby photon
                                 Vector3f wi = -photonRay.d;
                                 SampledSpectrum Phi =
@@ -3354,7 +3422,12 @@ void SPPMIntegrator::Render() {
                                     pixel.Phi_i[i].Add(Phi_i[i]);
 
                                 ++pixel.m;
+                                auto gridColorEnd = std::chrono::high_resolution_clock::now();
+                                gridPhotonColorCum += (gridColorEnd - gridColorStart).count();
                             });
+                            auto gridTimeEnd = std::chrono::high_resolution_clock::now();
+                            auto timeDiff = (gridTimeEnd - gridTimeStart);
+                            gridTimeSum += timeDiff.count();
                         }
                     }
                     // Sample new photon ray direction
@@ -3388,6 +3461,11 @@ void SPPMIntegrator::Render() {
 
                 scratchBuffer.Reset();
             }
+            auto photonTimeEnd = std::chrono::high_resolution_clock::now();
+            //timePhotonDuration += (photonTimeEnd - photonTimeStart);
+            timePhotonDuration.fetch_add((photonTimeEnd - photonTimeStart).count());
+            timePhotonGridDuration.fetch_add(gridTimeSum);
+            timePhotonColorDuration.fetch_add(gridPhotonColorCum);
         });
 
         auto timeEnd = std::chrono::high_resolution_clock::now();
@@ -3406,7 +3484,15 @@ void SPPMIntegrator::Render() {
 
             auto stats = visiblePoints.calc_stats();
 
+            auto tPhotonDur = timePhotonDuration.load() / MaxThreadIndex();
+            auto tGridDur = timePhotonGridDuration.load() / MaxThreadIndex();
+            auto tColorDur = timePhotonColorDuration.load() / MaxThreadIndex();
+            float sPhotonsTrace = std::chrono::duration_cast<fsec>(high_res_duration(tPhotonDur - tGridDur)).count();
+            float sGridEval = std::chrono::duration_cast<fsec>(high_res_duration(tGridDur - tColorDur)).count();
+            float sColorEval = std::chrono::duration_cast<fsec>(high_res_duration(tColorDur)).count();
+
             LOG_VERBOSE("Iteration %d stats: camera rays: %fs\t grid init: %fs\t photons: %fs\t total: %fs", iter + 1, sCamera, sGrid, sPhotons, sCamera + sGrid + sPhotons);
+            LOG_VERBOSE("Iteration %d stats2: photon tracing: %fs\t grid evaluation: %fs\t photon color: %fs", iter + 1, sPhotonsTrace, sGridEval, sColorEval);
             LOG_VERBOSE("Iteration %d grid stats: max length: %d\t median length %d\t occupied slots: %d/%d", iter + 1, stats.actualMax, stats.actualMedian, stats.actualUsed, gridRes[0] * gridRes[1] * gridRes[2]);
             LOG_VERBOSE("Iteration %d hash grid stats: max length %d\t median length %d\t avg length %f\t empty %f\t occupied slots: %d/%d", iter + 1, stats.max, stats.median, stats.average, stats.empty, stats.used, visiblePoints.hash_table_size());
             

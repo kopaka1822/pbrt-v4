@@ -581,8 +581,9 @@ template <typename Ta, typename Tb, typename Tc, typename Td>
 PBRT_CPU_GPU inline auto DifferenceOfProducts(Ta a, Tb b, Tc c, Td d) {
     auto cd = c * d;
     auto differenceOfProducts = FMA(a, b, -cd);
-    auto error = FMA(-c, d, cd);
-    return differenceOfProducts + error;
+    return differenceOfProducts; // faster
+    //auto error = FMA(-c, d, cd);
+    //return differenceOfProducts + error;
 }
 
 template <typename Ta, typename Tb, typename Tc, typename Td>
