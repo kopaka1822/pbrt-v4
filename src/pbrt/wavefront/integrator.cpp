@@ -46,7 +46,7 @@ STAT_MEMORY_COUNTER("Memory/Wavefront integrator pixel state", pathIntegratorByt
 static void updateMaterialNeeds(
     Material m, pstd::array<bool, Material::NumTags()> *haveBasicEvalMaterial,
     pstd::array<bool, Material::NumTags()> *haveUniversalEvalMaterial,
-    bool *haveSubsurface) {
+    bool *haveSubsurface, bool *haveMedia) {
     if (!m)
         return;
 
@@ -59,13 +59,14 @@ static void updateMaterialNeeds(
                       *mix);
 
         updateMaterialNeeds(mix->GetMaterial(0), haveBasicEvalMaterial,
-                            haveUniversalEvalMaterial, haveSubsurface);
+                            haveUniversalEvalMaterial, haveSubsurface, haveMedia);
         updateMaterialNeeds(mix->GetMaterial(1), haveBasicEvalMaterial,
-                            haveUniversalEvalMaterial, haveSubsurface);
+                            haveUniversalEvalMaterial, haveSubsurface, haveMedia);
         return;
     }
 
     *haveSubsurface |= m.HasSubsurfaceScattering();
+    *haveMedia |= (m == nullptr);  // interface material
 
     FloatTexture displace = m.GetDisplacement();
     if (m.CanEvaluateTextures(BasicTextureEvaluator()) &&
@@ -74,10 +75,23 @@ static void updateMaterialNeeds(
     else
         (*haveUniversalEvalMaterial)[m.Tag()] = true;
 }
-WavefrontPathIntegrator::WavefrontPathIntegrator(Allocator alloc, ParsedScene &scene) {
-    // Allocate all of the data structures that represent the scene...
-    std::map<std::string, Medium> media = scene.CreateMedia(alloc);
 
+WavefrontPathIntegrator::WavefrontPathIntegrator(
+    pstd::pmr::memory_resource *memoryResource, BasicScene &scene)
+    : memoryResource(memoryResource) {
+    ThreadLocal<Allocator> threadAllocators(
+        [memoryResource]() { return Allocator(memoryResource); });
+
+    Allocator alloc = threadAllocators.Get();
+
+    // Allocate all of the data structures that represent the scene...
+    std::map<std::string, Medium> media = scene.CreateMedia();
+
+    // "haveMedia" is a bit of a misnomer in that determines both whether
+    // queues are allocated for the medium sampling kernels and they are
+    // launched as well as whether the ray marching shadow ray kernel is
+    // launched... Thus, it will be true if there actually are no media,
+    // but some "interface" materials are present in the scene.
     haveMedia = false;
     // Check the shapes...
     for (const auto &shape : scene.shapes)
@@ -98,149 +112,55 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(Allocator alloc, ParsedScene &s
         return iter->second;
     };
 
-    filter = Filter::Create(scene.filter.name, scene.filter.parameters, &scene.filter.loc,
-                            alloc);
-
-    Float exposureTime = scene.camera.parameters.GetOneFloat("shutterclose", 1.f) -
-                         scene.camera.parameters.GetOneFloat("shutteropen", 0.f);
-    if (exposureTime <= 0)
-        ErrorExit(&scene.camera.loc,
-                  "The specified camera shutter times imply that the shutter "
-                  "does not open.  A black image will result.");
-
-    film = Film::Create(scene.film.name, scene.film.parameters, exposureTime,
-                        scene.camera.cameraTransform, filter, &scene.film.loc, alloc);
-    initializeVisibleSurface = film.UsesVisibleSurface();
-
-    sampler = Sampler::Create(scene.sampler.name, scene.sampler.parameters,
-                              film.FullResolution(), &scene.sampler.loc, alloc);
-    samplesPerPixel = sampler.SamplesPerPixel();
-
-    Medium cameraMedium = findMedium(scene.camera.medium, &scene.camera.loc);
-    camera = Camera::Create(scene.camera.name, scene.camera.parameters, cameraMedium,
-                            scene.camera.cameraTransform, film, &scene.camera.loc, alloc);
-
     // Textures
     LOG_VERBOSE("Starting to create textures");
-    NamedTextures textures = scene.CreateTextures(alloc, Options->useGPU);
+    NamedTextures textures = scene.CreateTextures();
     LOG_VERBOSE("Done creating textures");
 
+    LOG_VERBOSE("Starting to create lights");
     pstd::vector<Light> allLights;
+    std::map<int, pstd::vector<Light> *> shapeIndexToAreaLights;
 
     infiniteLights = alloc.new_object<pstd::vector<Light>>(alloc);
-    for (const auto &light : scene.lights) {
-        Medium outsideMedium = findMedium(light.medium, &light.loc);
-        if (light.renderFromObject.IsAnimated())
-            Warning(&light.loc,
-                    "Animated lights aren't supported. Using the start transform.");
 
-        Light l = Light::Create(
-            light.name, light.parameters, light.renderFromObject.startTransform,
-            scene.camera.cameraTransform, outsideMedium, &light.loc, alloc);
-
+    for (Light l : scene.CreateLights(textures, &shapeIndexToAreaLights)) {
         if (l.Is<UniformInfiniteLight>() || l.Is<ImageInfiniteLight>() ||
             l.Is<PortalImageInfiniteLight>())
             infiniteLights->push_back(l);
 
         allLights.push_back(l);
     }
-
-    // Area lights...
-    std::map<int, pstd::vector<Light> *> shapeIndexToAreaLights;
-    for (size_t i = 0; i < scene.shapes.size(); ++i) {
-        const auto &shape = scene.shapes[i];
-        if (shape.lightIndex == -1)
-            continue;
-
-        auto isInterface = [&]() {
-            std::string materialName;
-            if (shape.materialIndex != -1)
-                materialName = scene.materials[shape.materialIndex].name;
-            else {
-                for (auto iter = scene.namedMaterials.begin();
-                     iter != scene.namedMaterials.end(); ++iter)
-                    if (iter->first == shape.materialName) {
-                        materialName = iter->second.parameters.GetOneString("type", "");
-                        break;
-                    }
-            }
-            return (materialName == "interface" || materialName == "none" ||
-                    materialName.empty());
-        };
-        if (isInterface())
-            continue;
-
-        CHECK_LT(shape.lightIndex, scene.areaLights.size());
-        const auto &areaLightEntity = scene.areaLights[shape.lightIndex];
-        AnimatedTransform renderFromLight(*shape.renderFromObject);
-
-        pstd::vector<Shape> shapes =
-            Shape::Create(shape.name, shape.renderFromObject, shape.objectFromRender,
-                          shape.reverseOrientation, shape.parameters,
-                          textures.floatTextures, &shape.loc, alloc);
-
-        if (shapes.empty())
-            continue;
-
-        Medium outsideMedium = findMedium(shape.outsideMedium, &shape.loc);
-
-        FloatTexture alphaTex;
-        std::string alphaTexName = shape.parameters.GetTexture("alpha");
-        if (!alphaTexName.empty()) {
-            if (textures.floatTextures.find(alphaTexName) !=
-                textures.floatTextures.end()) {
-                alphaTex = textures.floatTextures[alphaTexName];
-                if (!BasicTextureEvaluator().CanEvaluate({alphaTex}, {}))
-                    // A warning will be issued elsewhere...
-                    alphaTex = nullptr;
-            } else
-                ErrorExit(&shape.loc,
-                          "%s: couldn't find float texture for \"alpha\" parameter.",
-                          alphaTexName);
-        } else if (Float alpha = shape.parameters.GetOneFloat("alpha", 1.f); alpha < 1.f)
-            alphaTex = alloc.new_object<FloatConstantTexture>(alpha);
-
-        pstd::vector<Light> *lightsForShape =
-            alloc.new_object<pstd::vector<Light>>(alloc);
-        for (Shape sh : shapes) {
-            if (renderFromLight.IsAnimated())
-                ErrorExit(&shape.loc, "Animated lights are not supported.");
-            DiffuseAreaLight *area = DiffuseAreaLight::Create(
-                renderFromLight.startTransform, outsideMedium, areaLightEntity.parameters,
-                areaLightEntity.parameters.ColorSpace(), &areaLightEntity.loc, alloc, sh,
-                alphaTex);
-            allLights.push_back(area);
-            lightsForShape->push_back(area);
-        }
-        shapeIndexToAreaLights[i] = lightsForShape;
-    }
+    LOG_VERBOSE("Done creating lights");
 
     LOG_VERBOSE("Starting to create materials");
     std::map<std::string, pbrt::Material> namedMaterials;
     std::vector<pbrt::Material> materials;
-    scene.CreateMaterials(textures, alloc, &namedMaterials, &materials);
+    scene.CreateMaterials(textures, &namedMaterials, &materials);
 
     haveBasicEvalMaterial.fill(false);
     haveUniversalEvalMaterial.fill(false);
     haveSubsurface = false;
     for (Material m : materials)
         updateMaterialNeeds(m, &haveBasicEvalMaterial, &haveUniversalEvalMaterial,
-                            &haveSubsurface);
+                            &haveSubsurface, &haveMedia);
     for (const auto &m : namedMaterials)
         updateMaterialNeeds(m.second, &haveBasicEvalMaterial, &haveUniversalEvalMaterial,
-                            &haveSubsurface);
+                            &haveSubsurface, &haveMedia);
     LOG_VERBOSE("Finished creating materials");
 
     if (Options->useGPU) {
 #ifdef PBRT_BUILD_GPU_RENDERER
-        aggregate = new OptiXAggregate(scene, alloc, textures, shapeIndexToAreaLights,
-                                       media, namedMaterials, materials);
+        CUDATrackedMemoryResource *mr =
+            dynamic_cast<CUDATrackedMemoryResource *>(memoryResource);
+        CHECK(mr);
+        aggregate = new OptiXAggregate(scene, mr, textures, shapeIndexToAreaLights, media,
+                                       namedMaterials, materials);
 #else
         LOG_FATAL("Options->useGPU was set without PBRT_BUILD_GPU_RENDERER enabled");
 #endif
     } else
-        aggregate = new CPUAggregate(scene, alloc, textures, shapeIndexToAreaLights,
-                                     media, namedMaterials, materials);
+        aggregate = new CPUAggregate(scene, textures, shapeIndexToAreaLights, media,
+                                     namedMaterials, materials);
 
     // Preprocess the light sources
     for (Light light : allLights)
@@ -252,11 +172,13 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(Allocator alloc, ParsedScene &s
     if (!haveLights)
         ErrorExit("No light sources specified");
 
+    LOG_VERBOSE("Starting to create light sampler");
     std::string lightSamplerName =
         scene.integrator.parameters.GetOneString("lightsampler", "bvh");
     if (allLights.size() == 1)
         lightSamplerName = "uniform";
     lightSampler = LightSampler::Create(lightSamplerName, allLights, alloc);
+    LOG_VERBOSE("Finished creating light sampler");
 
     if (scene.integrator.name != "path" && scene.integrator.name != "volpath")
         Warning(&scene.integrator.loc,
@@ -267,6 +189,14 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(Allocator alloc, ParsedScene &s
     // Integrator parameters
     regularize = scene.integrator.parameters.GetOneBool("regularize", false);
     maxDepth = scene.integrator.parameters.GetOneInt("maxdepth", 5);
+
+    camera = scene.GetCamera();
+    film = camera.GetFilm();
+    filter = film.GetFilter();
+    sampler = scene.GetSampler();
+
+    initializeVisibleSurface = film.UsesVisibleSurface();
+    samplesPerPixel = sampler.SamplesPerPixel();
 
     // Warn about unsupported stuff...
     if (Options->forceDiffuse)
@@ -284,10 +214,13 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(Allocator alloc, ParsedScene &s
         // Allocate storage for all of the queues/buffers...
 
 #ifdef PBRT_BUILD_GPU_RENDERER
-    CUDATrackedMemoryResource *mr =
-        dynamic_cast<CUDATrackedMemoryResource *>(gpuMemoryAllocator.resource());
-    CHECK(mr);
-    size_t startSize = mr->BytesAllocated();
+    size_t startSize = 0;
+    if (Options->useGPU) {
+        CUDATrackedMemoryResource *mr =
+            dynamic_cast<CUDATrackedMemoryResource *>(memoryResource);
+        CHECK(mr);
+        startSize = mr->BytesAllocated();
+    }
 #endif  // PBRT_BUILD_GPU_RENDERER
 
     // Compute number of scanlines to render per pass
@@ -342,8 +275,13 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(Allocator alloc, ParsedScene &s
     stats = alloc.new_object<Stats>(maxDepth, alloc);
 
 #ifdef PBRT_BUILD_GPU_RENDERER
-    size_t endSize = mr->BytesAllocated();
-    pathIntegratorBytes += endSize - startSize;
+    if (Options->useGPU) {
+        CUDATrackedMemoryResource *mr =
+            dynamic_cast<CUDATrackedMemoryResource *>(memoryResource);
+        CHECK(mr);
+        size_t endSize = mr->BytesAllocated();
+        pathIntegratorBytes += endSize - startSize;
+    }
 #endif  // PBRT_BUILD_GPU_RENDERER
 }
 
@@ -380,7 +318,7 @@ Float WavefrontPathIntegrator::Render() {
             // ensures that there isn't a big performance hitch for the first batch
             // of rays as that stuff is copied over on demand.
             CUDATrackedMemoryResource *mr =
-                dynamic_cast<CUDATrackedMemoryResource *>(gpuMemoryAllocator.resource());
+                dynamic_cast<CUDATrackedMemoryResource *>(memoryResource);
             CHECK(mr);
             mr->PrefetchToGPU();
         } else {
@@ -491,11 +429,15 @@ Float WavefrontPathIntegrator::Render() {
                               Options->quiet, Options->useGPU);
     for (int sampleIndex = firstSampleIndex; sampleIndex < lastSampleIndex;
          ++sampleIndex) {
+        // Attempt to work around issue #145.
+#if !(defined(PBRT_IS_WINDOWS) && defined(PBRT_BUILD_GPU_RENDERER) && \
+      __CUDACC_VER_MAJOR__ == 11 && __CUDACC_VER_MINOR__ == 1)
         CheckCallbackScope _([&]() {
             return StringPrintf("Wavefront rendering failed at sample %d. Debug with "
                                 "\"--debugstart %d\"\n",
                                 sampleIndex, sampleIndex);
         });
+#endif
 
         // Render image for sample _sampleIndex_
         LOG_VERBOSE("Starting to submit work for sample %d", sampleIndex);
@@ -631,24 +573,22 @@ void WavefrontPathIntegrator::HandleEscapedRays() {
             for (const auto &light : *infiniteLights) {
                 if (SampledSpectrum Le = light.Le(Ray(w.rayo, w.rayd), w.lambda); Le) {
                     // Compute path radiance contribution from infinite light
-                    PBRT_DBG("L %f %f %f %f T_hat %f %f %f %f Le %f %f %f %f", L[0], L[1],
-                             L[2], L[3], w.T_hat[0], w.T_hat[1], w.T_hat[2], w.T_hat[3],
+                    PBRT_DBG("L %f %f %f %f beta %f %f %f %f Le %f %f %f %f", L[0], L[1],
+                             L[2], L[3], w.beta[0], w.beta[1], w.beta[2], w.beta[3],
                              Le[0], Le[1], Le[2], Le[3]);
-                    PBRT_DBG("pdf uni %f %f %f %f pdf nee %f %f %f %f", w.uniPathPDF[0],
-                             w.uniPathPDF[1], w.uniPathPDF[2], w.uniPathPDF[3],
-                             w.lightPathPDF[0], w.lightPathPDF[1], w.lightPathPDF[2],
-                             w.lightPathPDF[3]);
+                    PBRT_DBG("pdf uni %f %f %f %f pdf nee %f %f %f %f", w.inv_w_u[0],
+                             w.inv_w_u[1], w.inv_w_u[2], w.inv_w_u[3], w.inv_w_l[0],
+                             w.inv_w_l[1], w.inv_w_l[2], w.inv_w_l[3]);
 
                     if (w.depth == 0 || w.specularBounce) {
-                        L += w.T_hat * Le / w.uniPathPDF.Average();
+                        L += w.beta * Le / w.inv_w_u.Average();
                     } else {
                         // Compute MIS-weighted radiance contribution from infinite light
                         LightSampleContext ctx = w.prevIntrCtx;
-                        Float lightChoicePDF = lightSampler.PDF(ctx, light);
-                        SampledSpectrum lightPathPDF =
-                            w.lightPathPDF * lightChoicePDF *
-                            light.PDF_Li(ctx, w.rayd, LightSamplingMode::WithMIS);
-                        L += w.T_hat * Le / (w.uniPathPDF + lightPathPDF).Average();
+                        Float lightChoicePDF = lightSampler.PMF(ctx, light);
+                        SampledSpectrum inv_w_l =
+                            w.inv_w_l * lightChoicePDF * light.PDF_Li(ctx, w.rayd, true);
+                        L += w.beta * Le / (w.inv_w_u + inv_w_l).Average();
                     }
                 }
             }
@@ -677,19 +617,18 @@ void WavefrontPathIntegrator::HandleEmissiveIntersection() {
 
             // Compute area light's weighted radiance contribution to the path
             SampledSpectrum L(0.f);
-            if (w.depth == 0 || w.isSpecularBounce) {
-                L = w.T_hat * Le / w.uniPathPDF.Average();
+            if (w.depth == 0 || w.specularBounce) {
+                L = w.beta * Le / w.inv_w_u.Average();
             } else {
                 // Compute MIS-weighted radiance contribution from area light
                 Vector3f wi = -w.wo;
                 LightSampleContext ctx = w.prevIntrCtx;
-                Float lightChoicePDF = lightSampler.PDF(ctx, w.areaLight);
-                Float lightPDF = lightChoicePDF *
-                                 w.areaLight.PDF_Li(ctx, wi, LightSamplingMode::WithMIS);
+                Float lightChoicePDF = lightSampler.PMF(ctx, w.areaLight);
+                Float lightPDF = lightChoicePDF * w.areaLight.PDF_Li(ctx, wi, true);
 
-                SampledSpectrum uniPathPDF = w.uniPathPDF;
-                SampledSpectrum lightPathPDF = w.lightPathPDF * lightPDF;
-                L = w.T_hat * Le / (uniPathPDF + lightPathPDF).Average();
+                SampledSpectrum inv_w_u = w.inv_w_u;
+                SampledSpectrum inv_w_l = w.inv_w_l * lightPDF;
+                L = w.beta * Le / (inv_w_u + inv_w_l).Average();
             }
 
             PBRT_DBG("Added L %f %f %f %f for pixel index %d\n", L[0], L[1], L[2], L[3],

@@ -10,6 +10,7 @@
 #include <pbrt/util/print.h>
 #include <pbrt/util/string.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -130,11 +131,11 @@ void IPCChannel::Connect() {
         struct timeval timeout;
         timeout.tv_sec = 3;
         timeout.tv_usec = 0;
-        if (setsockopt(socketFd, SOL_SOCKET, SO_SNDTIMEO, &timeout,
-                       sizeof(timeout)) == SOCKET_ERROR) {
+        if (setsockopt(socketFd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) ==
+            SOCKET_ERROR) {
             LOG_VERBOSE("setsockopt() failed: %s", ErrorString());
         }
-#endif // PBRT_IS_LINUX
+#endif  // PBRT_IS_LINUX
 
         if (connect(socketFd, ptr->ai_addr, ptr->ai_addrlen) == SOCKET_ERROR) {
 #ifdef PBRT_IS_WINDOWS
@@ -190,7 +191,8 @@ bool IPCChannel::Send(pstd::span<const uint8_t> message) {
     int *startPtr = (int *)message.data();
     *startPtr = message.size();
 
-    int bytesSent = send(socketFd, (const char *)message.data(), message.size(), 0 /* flags */);
+    int bytesSent =
+        send(socketFd, (const char *)message.data(), message.size(), 0 /* flags */);
     if (bytesSent == message.size())
         return true;
 
@@ -469,7 +471,7 @@ static DisplayItem GetImageDisplayItem(const std::string &title, const Image &im
     return DisplayItem(title, image.Resolution(), channelNames, getValues);
 }
 
-void DisplayStatic(const std::string &title, const Image &image,
+void DisplayStatic(std::string title, const Image &image,
                    pstd::optional<ImageChannelDesc> channelDesc) {
     DisplayItem item = GetImageDisplayItem(title, image, channelDesc);
 
@@ -478,14 +480,13 @@ void DisplayStatic(const std::string &title, const Image &image,
         LOG_ERROR("Unable to display static content \"%s\".", title);
 }
 
-void DisplayDynamic(const std::string &title, const Image &image,
+void DisplayDynamic(std::string title, const Image &image,
                     pstd::optional<ImageChannelDesc> channelDesc) {
     std::lock_guard<std::mutex> lock(mutex);
     dynamicItems.push_back(GetImageDisplayItem(title, image, channelDesc));
 }
 
-void DisplayStatic(
-    const std::string &title, const Point2i &resolution,
+void DisplayStatic(std::string title, Point2i resolution,
     std::vector<std::string> channelNames,
     std::function<void(Bounds2i b, pstd::span<pstd::span<Float>>)> getTileValues) {
     DisplayItem item(title, resolution, channelNames, getTileValues);
@@ -495,8 +496,7 @@ void DisplayStatic(
         LOG_ERROR("Unable to display static content \"%s\".", title);
 }
 
-void DisplayDynamic(
-    const std::string &title, const Point2i &resolution,
+void DisplayDynamic(std::string title, Point2i resolution,
     std::vector<std::string> channelNames,
     std::function<void(Bounds2i b, pstd::span<pstd::span<Float>>)> getTileValues) {
     std::lock_guard<std::mutex> lock(mutex);

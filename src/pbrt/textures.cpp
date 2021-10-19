@@ -18,6 +18,7 @@
 #include <pbrt/util/splines.h>
 #include <pbrt/util/stats.h>
 
+#include <algorithm>
 #include <mutex>
 
 #include <Ptexture.h>
@@ -31,6 +32,15 @@ std::string TextureEvalContext::ToString() const {
         p, dpdx, dpdy, n, uv, dudx, dudy, dvdx, dvdy, faceIndex);
 }
 
+std::string TexCoord2D::ToString() const {
+    return StringPrintf("[ TexCoord2D st: %s dsdx: %f dsdy: %f dtdx: %f dtdy: %f ]", st,
+                        dsdx, dsdy, dtdx, dtdy);
+}
+
+std::string TexCoord3D::ToString() const {
+    return StringPrintf("[ TexCoord3D p: %s dpdx: %s dpdy: %s ]", p, dpdx, dpdy);
+}
+
 TextureMapping2D TextureMapping2D::Create(const ParameterDictionary &parameters,
                                           const Transform &renderFromTexture,
                                           const FileLoc *loc, Allocator alloc) {
@@ -40,27 +50,27 @@ TextureMapping2D TextureMapping2D::Create(const ParameterDictionary &parameters,
         Float sv = parameters.GetOneFloat("vscale", 1.);
         Float du = parameters.GetOneFloat("udelta", 0.);
         Float dv = parameters.GetOneFloat("vdelta", 0.);
-        return alloc.new_object<UVMapping2D>(su, sv, du, dv);
+        return alloc.new_object<UVMapping>(su, sv, du, dv);
     } else if (type == "spherical")
-        return alloc.new_object<SphericalMapping2D>(Inverse(renderFromTexture));
+        return alloc.new_object<SphericalMapping>(Inverse(renderFromTexture));
     else if (type == "cylindrical")
-        return alloc.new_object<CylindricalMapping2D>(Inverse(renderFromTexture));
+        return alloc.new_object<CylindricalMapping>(Inverse(renderFromTexture));
     else if (type == "planar")
-        return alloc.new_object<PlanarMapping2D>(
+        return alloc.new_object<PlanarMapping>(
             Inverse(renderFromTexture),
             parameters.GetOneVector3f("v1", Vector3f(1, 0, 0)),
             parameters.GetOneVector3f("v2", Vector3f(0, 1, 0)),
             parameters.GetOneFloat("udelta", 0.f), parameters.GetOneFloat("vdelta", 0.f));
     else {
         Error(loc, "2D texture mapping \"%s\" unknown", type);
-        return alloc.new_object<UVMapping2D>();
+        return alloc.new_object<UVMapping>();
     }
 }
 
 TextureMapping3D TextureMapping3D::Create(const ParameterDictionary &parameters,
                                           const Transform &renderFromTexture,
                                           const FileLoc *loc, Allocator alloc) {
-    return alloc.new_object<TransformMapping3D>(Inverse(renderFromTexture));
+    return alloc.new_object<PointTransformMapping>(Inverse(renderFromTexture));
 }
 
 std::string FloatTexture::ToString() const {
@@ -79,26 +89,25 @@ std::string SpectrumTexture::ToString() const {
     return DispatchCPU(toStr);
 }
 
-std::string UVMapping2D::ToString() const {
-    return StringPrintf("[ UVMapping2D su: %f sv: %f du: %f dv: %f ]", su, sv, du, dv);
+std::string UVMapping::ToString() const {
+    return StringPrintf("[ UVMapping su: %f sv: %f du: %f dv: %f ]", su, sv, du, dv);
 }
 
-std::string SphericalMapping2D::ToString() const {
-    return StringPrintf("[ SphericalMapping2D textureFromRender: %s ]",
+std::string SphericalMapping::ToString() const {
+    return StringPrintf("[ SphericalMapping textureFromRender: %s ]", textureFromRender);
+}
+
+std::string CylindricalMapping::ToString() const {
+    return StringPrintf("[ CylindricalMapping textureFromRender: %s ]",
                         textureFromRender);
 }
 
-std::string CylindricalMapping2D::ToString() const {
-    return StringPrintf("[ CylindricalMapping2D textureFromRender: %s ]",
-                        textureFromRender);
+std::string PlanarMapping::ToString() const {
+    return StringPrintf("[ PlanarMapping vs: %s vt: %s ds: %f dt: %f]", vs, vt, ds, dt);
 }
 
-std::string PlanarMapping2D::ToString() const {
-    return StringPrintf("[ PlanarMapping2D vs: %s vt: %s ds: %f dt: %f]", vs, vt, ds, dt);
-}
-
-std::string TransformMapping3D::ToString() const {
-    return StringPrintf("[ TransformMapping3D textureFromRender: %s ]",
+std::string PointTransformMapping::ToString() const {
+    return StringPrintf("[ PointTransformMapping textureFromRender: %s ]",
                         textureFromRender);
 }
 
@@ -174,33 +183,31 @@ Float Checkerboard(TextureEvalContext ctx, TextureMapping2D map2D,
         return x / 2 + y * (1 - 2 * std::abs(y));
     };
 
-    auto bf = [&](Float x, Float w) -> Float {
-        if (pstd::floor(x - w) == pstd::floor(x + w))
+    auto bf = [&](Float x, Float r) -> Float {
+        if (pstd::floor(x - r) == pstd::floor(x + r))
             return 1 - 2 * (int(pstd::floor(x)) & 1);
-        return (d(x + w) - 2 * d(x) + d(x - w)) / Sqr(w);
+        return (d(x + r) - 2 * d(x) + d(x - r)) / Sqr(r);
     };
 
     if (map2D) {
         // Return weights for 2D checkerboard texture
         CHECK(!map3D);
-        Vector2f dstdx, dstdy;
-        Point2f st = map2D.Map(ctx, &dstdx, &dstdy);
-        Float ds = std::max(std::abs(dstdx[0]), std::abs(dstdy[0]));
-        Float dt = std::max(std::abs(dstdx[1]), std::abs(dstdy[1]));
+        TexCoord2D c = map2D.Map(ctx);
+        Float ds = std::max(std::abs(c.dsdx), std::abs(c.dsdy));
+        Float dt = std::max(std::abs(c.dtdx), std::abs(c.dtdy));
         // Integrate product of 2D checkerboard function and triangle filter
         ds *= 1.5f;
         dt *= 1.5f;
-        return 0.5f - 0.5f * bf(st[0], ds) * bf(st[1], dt);
+        return 0.5f - bf(c.st[0], ds) * bf(c.st[1], dt) / 2;
 
     } else {
         // Return weights for 3D checkerboard texture
         CHECK(map3D);
-        Vector3f dpdx, dpdy;
-        Point3f p = map3D.Map(ctx, &dpdx, &dpdy);
-        Float dx = 1.5f * std::max(std::abs(dpdx.x), std::abs(dpdy.x));
-        Float dy = 1.5f * std::max(std::abs(dpdx.y), std::abs(dpdy.y));
-        Float dz = 1.5f * std::max(std::abs(dpdx.z), std::abs(dpdy.z));
-        return 0.5f - 0.5f * bf(p.x, dx) * bf(p.y, dy) * bf(p.z, dz);
+        TexCoord3D c = map3D.Map(ctx);
+        Float dx = 1.5f * std::max(std::abs(c.dpdx.x), std::abs(c.dpdy.x));
+        Float dy = 1.5f * std::max(std::abs(c.dpdx.y), std::abs(c.dpdy.y));
+        Float dz = 1.5f * std::max(std::abs(c.dpdx.z), std::abs(c.dpdy.z));
+        return 0.5f - 0.5f * bf(c.p.x, dx) * bf(c.p.y, dy) * bf(c.p.z, dz);
     }
 }
 
@@ -284,7 +291,7 @@ bool InsidePolkaDot(Point2f st) {
         Float sCenter = sCell + maxShift * Noise(sCell + 1.5f, tCell + 2.8f);
         Float tCenter = tCell + maxShift * Noise(sCell + 4.5f, tCell + 9.8f);
         Vector2f dst = st - Point2f(sCenter, tCenter);
-        if (LengthSquared(dst) < radius * radius)
+        if (LengthSquared(dst) < Sqr(radius))
             return true;
     }
     return false;
@@ -351,12 +358,11 @@ SampledSpectrum SpectrumImageTexture::Evaluate(TextureEvalContext ctx,
     return SampledSpectrum(0);
 #else
     // Apply texture mapping and flip $t$ coordinate for image texture lookup
-    Vector2f dstdx, dstdy;
-    Point2f st = mapping.Map(ctx, &dstdx, &dstdy);
-    st[1] = 1 - st[1];
+    TexCoord2D c = mapping.Map(ctx);
+    c.st[1] = 1 - c.st[1];
 
     // Lookup filtered RGB value in _MIPMap_
-    RGB rgb = scale * mipmap->Filter<RGB>(st, dstdx, dstdy);
+    RGB rgb = scale * mipmap->Filter<RGB>(c.st, {c.dsdx, c.dtdx}, {c.dsdy, c.dtdy});
     rgb = ClampZero(invert ? (RGB(1, 1, 1) - rgb) : rgb);
 
     // Return _SampledSpectrum_ for RGB image texture value
@@ -468,21 +474,21 @@ SpectrumImageTexture *SpectrumImageTexture::Create(
 // MarbleTexture Method Definitions
 SampledSpectrum MarbleTexture::Evaluate(TextureEvalContext ctx,
                                         SampledWavelengths lambda) const {
-    Vector3f dpdx, dpdy;
-    Point3f p = mapping.Map(ctx, &dpdx, &dpdy);
-    p *= scale;
-    Float marble = p.y + variation * FBm(p, scale * dpdx, scale * dpdy, omega, octaves);
+    TexCoord3D c = mapping.Map(ctx);
+    c.p *= scale;
+    Float marble =
+        c.p.y + variation * FBm(c.p, scale * c.dpdx, scale * c.dpdy, omega, octaves);
     Float t = .5f + .5f * std::sin(marble);
     // Evaluate marble spline at $t$ to compute color _rgb_
-    const RGB c[] = {
+    const RGB colors[] = {
         {.58f, .58f, .6f}, {.58f, .58f, .6f}, {.58f, .58f, .6f},
         {.5f, .5f, .5f},   {.6f, .59f, .58f}, {.58f, .58f, .6f},
         {.58f, .58f, .6f}, {.2f, .2f, .33f},  {.58f, .58f, .6f},
     };
-    int nSeg = PBRT_ARRAYSIZE(c) - 3;
+    int nSeg = PBRT_ARRAYSIZE(colors) - 3;
     int first = std::min<int>(pstd::floor(t * nSeg), nSeg - 1);
     t = t * nSeg - first;
-    RGB rgb = 1.5f * EvaluateCubicBezier(pstd::span(c + first, 4), t);
+    RGB rgb = 1.5f * EvaluateCubicBezier(pstd::span(colors + first, 4), t);
 
 #ifdef PBRT_IS_GPU_CODE
     return RGBAlbedoSpectrum(*RGBColorSpace_sRGB, rgb).Sample(lambda);
@@ -1070,16 +1076,28 @@ static cudaTextureAddressMode convertAddressMode(const std::string &mode) {
 GPUSpectrumImageTexture *GPUSpectrumImageTexture::Create(
     const Transform &renderFromTexture, const TextureParameterDictionary &parameters,
     SpectrumType spectrumType, const FileLoc *loc, Allocator alloc) {
-    /*
-      Float maxAniso = parameters.GetOneFloat("maxanisotropy", 8.f);
-      std::string filter = parameters.GetOneString("filter", "bilinear");
-      const char *defaultEncoding = HasExtension(filename, "png") ? "sRGB" :
-      "linear"; std::string encodingString = parameters.GetOneString("encoding",
-      defaultEncoding); const ColorEncoding *encoding =
-      ColorEncoding::Get(encodingString, alloc);
-    */
+    // Initialize _ImageTexture_ parameters
+    Float maxAniso = parameters.GetOneFloat("maxanisotropy", 8.f);
+    std::string filter = parameters.GetOneString("filter", "bilinear");
+    MIPMapFilterOptions filterOptions;
+    filterOptions.maxAnisotropy = maxAniso;
+    pstd::optional<FilterFunction> ff = ParseFilter(filter);
+    if (ff)
+        filterOptions.filter = *ff;
+    else
+        Error(loc, "%s: filter function unknown", filter);
 
+    std::string wrapString = parameters.GetOneString("wrap", "repeat");
+    pstd::optional<WrapMode> wrapMode = ParseWrapMode(wrapString.c_str());
+    if (!wrapMode)
+        ErrorExit("%s: wrap mode unknown", wrapString);
+    Float scale = parameters.GetOneFloat("scale", 1.f);
+    bool invert = parameters.GetOneBool("invert", false);
     std::string filename = ResolveFilename(parameters.GetOneString("filename", ""));
+
+    const char *defaultEncoding = HasExtension(filename, "png") ? "sRGB" : "linear";
+    std::string encodingString = parameters.GetOneString("encoding", defaultEncoding);
+    ColorEncoding encoding = ColorEncoding::Get(encodingString, alloc);
 
     // These have to be initialized one way or another in the below
     cudaMipmappedArray_t mipArray;
@@ -1271,17 +1289,19 @@ GPUSpectrumImageTexture *GPUSpectrumImageTexture::Create(
     resDesc.resType = cudaResourceTypeMipmappedArray;
     resDesc.res.mipmap.mipmap = mipArray;
 
-    std::string wrap = parameters.GetOneString("wrap", "repeat");
     cudaTextureDesc texDesc = {};
-    texDesc.addressMode[0] = convertAddressMode(wrap);
-    texDesc.addressMode[1] = convertAddressMode(wrap);
-    texDesc.filterMode = cudaFilterModeLinear;
+    texDesc.addressMode[0] = convertAddressMode(wrapString);
+    texDesc.addressMode[1] = convertAddressMode(wrapString);
+    texDesc.filterMode = filter == "point" ? cudaFilterModePoint : cudaFilterModeLinear;
     texDesc.readMode = readMode;
     texDesc.normalizedCoords = 1;
-    texDesc.maxAnisotropy = 1;  // TODO...
+    texDesc.maxAnisotropy = Clamp(maxAniso, 1, 16);
     texDesc.maxMipmapLevelClamp = nMIPMapLevels - 1;
     texDesc.minMipmapLevelClamp = 0;
-    texDesc.mipmapFilterMode = cudaFilterModePoint;
+    texDesc.mipmapFilterMode =
+        (filter == "trilinear" || filter == "ewa" || filter == "EWA")
+            ? cudaFilterModeLinear
+            : cudaFilterModePoint;
     texDesc.borderColor[0] = texDesc.borderColor[1] = texDesc.borderColor[2] =
         texDesc.borderColor[3] = 0.f;
     texDesc.sRGB = 1;
@@ -1291,9 +1311,6 @@ GPUSpectrumImageTexture *GPUSpectrumImageTexture::Create(
 
     TextureMapping2D mapping =
         TextureMapping2D::Create(parameters, renderFromTexture, loc, alloc);
-
-    Float scale = parameters.GetOneFloat("scale", 1.f);
-    bool invert = parameters.GetOneBool("invert", false);
 
     return alloc.new_object<GPUSpectrumImageTexture>(filename, mapping, texObj, scale,
                                                      invert, isSingleChannel, colorSpace,
@@ -1309,15 +1326,28 @@ std::string GPUSpectrumImageTexture::ToString() const {
 GPUFloatImageTexture *GPUFloatImageTexture::Create(
     const Transform &renderFromTexture, const TextureParameterDictionary &parameters,
     const FileLoc *loc, Allocator alloc) {
-    /*
-      Float maxAniso = parameters.GetOneFloat("maxanisotropy", 8.f);
-      std::string filter = parameters.GetOneString("filter", "bilinear");
-      const char *defaultEncoding = HasExtension(filename, "png") ? "sRGB" :
-      "linear"; std::string encodingString = parameters.GetOneString("encoding",
-      defaultEncoding); const ColorEncoding *encoding =
-      ColorEncoding::Get(encodingString, alloc);
-    */
+    // Initialize _ImageTexture_ parameters
+    Float maxAniso = parameters.GetOneFloat("maxanisotropy", 8.f);
+    std::string filter = parameters.GetOneString("filter", "bilinear");
+    MIPMapFilterOptions filterOptions;
+    filterOptions.maxAnisotropy = maxAniso;
+    pstd::optional<FilterFunction> ff = ParseFilter(filter);
+    if (ff)
+        filterOptions.filter = *ff;
+    else
+        Error(loc, "%s: filter function unknown", filter);
+
+    std::string wrapString = parameters.GetOneString("wrap", "repeat");
+    pstd::optional<WrapMode> wrapMode = ParseWrapMode(wrapString.c_str());
+    if (!wrapMode)
+        ErrorExit("%s: wrap mode unknown", wrapString);
+    Float scale = parameters.GetOneFloat("scale", 1.f);
+    bool invert = parameters.GetOneBool("invert", false);
     std::string filename = ResolveFilename(parameters.GetOneString("filename", ""));
+
+    const char *defaultEncoding = HasExtension(filename, "png") ? "sRGB" : "linear";
+    std::string encodingString = parameters.GetOneString("encoding", defaultEncoding);
+    ColorEncoding encoding = ColorEncoding::Get(encodingString, alloc);
 
     cudaMipmappedArray_t mipArray;
     int nMIPMapLevels = 0;
@@ -1384,17 +1414,19 @@ GPUFloatImageTexture *GPUFloatImageTexture::Create(
     resDesc.resType = cudaResourceTypeMipmappedArray;
     resDesc.res.mipmap.mipmap = mipArray;
 
-    std::string wrap = parameters.GetOneString("wrap", "repeat");
     cudaTextureDesc texDesc = {};
-    texDesc.addressMode[0] = convertAddressMode(wrap);
-    texDesc.addressMode[1] = convertAddressMode(wrap);
-    texDesc.filterMode = cudaFilterModeLinear;
+    texDesc.addressMode[0] = convertAddressMode(wrapString);
+    texDesc.addressMode[1] = convertAddressMode(wrapString);
+    texDesc.filterMode = filter == "point" ? cudaFilterModePoint : cudaFilterModeLinear;
     texDesc.readMode = readMode;
     texDesc.normalizedCoords = 1;
-    texDesc.maxAnisotropy = 1;  // TODO
+    texDesc.maxAnisotropy = Clamp(maxAniso, 1, 16);
     texDesc.maxMipmapLevelClamp = nMIPMapLevels - 1;
     texDesc.minMipmapLevelClamp = 0;
-    texDesc.mipmapFilterMode = cudaFilterModePoint;
+    texDesc.mipmapFilterMode =
+        (filter == "trilinear" || filter == "ewa" || filter == "EWA")
+            ? cudaFilterModeLinear
+            : cudaFilterModePoint;
     texDesc.borderColor[0] = texDesc.borderColor[1] = texDesc.borderColor[2] =
         texDesc.borderColor[3] = 0.f;
     texDesc.sRGB = 1;
@@ -1404,9 +1436,6 @@ GPUFloatImageTexture *GPUFloatImageTexture::Create(
 
     TextureMapping2D mapping =
         TextureMapping2D::Create(parameters, renderFromTexture, loc, alloc);
-
-    Float scale = parameters.GetOneFloat("scale", 1.f);
-    bool invert = parameters.GetOneBool("invert", false);
 
     return alloc.new_object<GPUFloatImageTexture>(filename, mapping, texObj, scale,
                                                   invert);
@@ -1465,8 +1494,7 @@ FloatTexture FloatTexture::Create(const std::string &name,
 
     ++nTextures;
 
-    // FIXME: reenable this once we handle all the same image texture parameters
-    // CO    parameters.ReportUnused();
+    parameters.ReportUnused();
     return tex;
 }
 
@@ -1521,8 +1549,8 @@ SpectrumTexture SpectrumTexture::Create(const std::string &name,
 
     ++nTextures;
 
-    // FIXME: reenable this once we handle all the same image texture parameters
-    // CO    parameters.ReportUnused();
+    parameters.ReportUnused();
+
     return tex;
 }
 

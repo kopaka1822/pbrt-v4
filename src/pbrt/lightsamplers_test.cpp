@@ -27,7 +27,7 @@ TEST(BVHLightSampling, OneSpot) {
     ConstantSpectrum one(1.f);
     lights.push_back(new SpotLight(id, MediumInterface(), &one, 1.f /* scale */,
                                    45.f /* total width */,
-                                   44.f /* falloff start */, Allocator()));
+                                   44.f /* falloff start */));
     BVHLightSampler distrib(lights, Allocator());
 
     RNG rng;
@@ -57,7 +57,7 @@ TEST(BVHLightSampling, OneSpot) {
         } else
             EXPECT_TRUE((bool)ls);
 
-        EXPECT_EQ(1, sampledLight->pdf);
+        EXPECT_EQ(1, sampledLight->p);
         EXPECT_TRUE(sampledLight->light == lights[0]);
         EXPECT_TRUE((bool)ls->L) << ls->L << " @ " << p;
     }
@@ -74,8 +74,7 @@ TEST(BVHLightSampling, Point) {
         // Random point in [-5, 5]
         Vector3f p{Lerp(rng.Uniform<Float>(), -5, 5), Lerp(rng.Uniform<Float>(), -5, 5),
                    Lerp(rng.Uniform<Float>(), -5, 5)};
-        lights.push_back(
-            new PointLight(Translate(p), MediumInterface(), &one, 1.f, Allocator()));
+        lights.push_back(new PointLight(Translate(p), MediumInterface(), &one, 1.f));
         lightToIndex[lights.back()] = i;
     }
     BVHLightSampler distrib(lights, Allocator());
@@ -96,11 +95,11 @@ TEST(BVHLightSampling, Point) {
             // Can assume this because it's all point lights
             ASSERT_TRUE((bool)sampledLight);
 
-            EXPECT_GT(sampledLight->pdf, 0);
+            EXPECT_GT(sampledLight->p, 0);
             sumWt[lightToIndex[sampledLight->light]] +=
-                1 / (sampledLight->pdf * nSamples);
+                1 / (sampledLight->p * nSamples);
 
-            EXPECT_FLOAT_EQ(sampledLight->pdf, distrib.PDF(intr, sampledLight->light));
+            EXPECT_FLOAT_EQ(sampledLight->p, distrib.PMF(intr, sampledLight->light));
         }
 
         for (int i = 0; i < lights.size(); ++i) {
@@ -126,7 +125,7 @@ TEST(BVHLightSampling, PointVaryPower) {
         lightSpectra.push_back(std::make_unique<ConstantSpectrum>(lightPower.back()));
         sumPower += lightPower.back();
         lights.push_back(new PointLight(Translate(p), MediumInterface(),
-                                        lightSpectra.back().get(), 1.f, Allocator()));
+                                        lightSpectra.back().get(), 1.f));
         lightToIndex[lights.back()] = i;
     }
     BVHLightSampler distrib(lights, Allocator());
@@ -148,11 +147,11 @@ TEST(BVHLightSampling, PointVaryPower) {
             ASSERT_TRUE((bool)sampledLight);
 
             Light light = sampledLight->light;
-            Float pdf = sampledLight->pdf;
+            Float pdf = sampledLight->p;
             EXPECT_GT(pdf, 0);
             sumWt[lightToIndex[light]] += 1 / (pdf * nSamples);
 
-            EXPECT_LT(std::abs(distrib.PDF(intr, light) - pdf) / pdf, 1e-4);
+            EXPECT_LT(std::abs(distrib.PMF(intr, light) - pdf) / pdf, 1e-4);
         }
 
         for (int i = 0; i < lights.size(); ++i) {
@@ -179,11 +178,11 @@ TEST(BVHLightSampling, PointVaryPower) {
             pstd::optional<SampledLight> sampledLight = distrib.Sample(intr, u);
             ASSERT_TRUE((bool)sampledLight);
             Light light = sampledLight->light;
-            Float pdf = sampledLight->pdf;
+            Float pdf = sampledLight->p;
             EXPECT_GT(pdf, 0);
             ++counts[lightToIndex[light]];
 
-            EXPECT_FLOAT_EQ(pdf, distrib.PDF(intr, light));
+            EXPECT_FLOAT_EQ(pdf, distrib.PMF(intr, light));
         }
 
         for (int i = 0; i < lights.size(); ++i) {
@@ -200,15 +199,15 @@ TEST(BVHLightSampling, OneTri) {
     std::vector<int> indices{0, 1, 2};
     // Light is illuminating points with z > 0
     std::vector<Point3f> p{Point3f(-1, -1, 0), Point3f(1, -1, 0), Point3f(0, 1, 0)};
-    TriangleMesh mesh(id, false /* rev orientation */, indices, p, {}, {}, {}, {});
+    TriangleMesh mesh(id, false /* rev orientation */, indices, p, {}, {}, {}, {},
+                      Allocator());
     auto tris = Triangle::CreateTriangles(&mesh, Allocator());
 
     ASSERT_EQ(1, tris.size());
     std::vector<Light> lights;
     ConstantSpectrum one(1.f);
     lights.push_back(new DiffuseAreaLight(id, MediumInterface(), &one, 1.f, tris[0],
-                                          nullptr, Image(), nullptr, false /* two sided */,
-                                          Allocator()));
+                                          nullptr, Image(), nullptr, false /* two sided */));
 
     BVHLightSampler distrib(lights, Allocator());
 
@@ -250,14 +249,15 @@ static std::tuple<std::vector<Light>, std::vector<Shape>> randomLights(
                                    Point3f{r(), r(), r()}};
             // leaks...
             TriangleMesh *mesh = new TriangleMesh(id, false /* rev orientation */,
-                                                  indices, p, {}, {}, {}, {});
+                                                  indices, p, {}, {}, {}, {},
+                                                  Allocator());
             auto tris = Triangle::CreateTriangles(mesh, Allocator());
             CHECK_EQ(1, tris.size());  // EXPECT doesn't work since this is in a
                                        // function :-p
             static Transform id;
             lights.push_back(alloc.new_object<DiffuseAreaLight>(
                 id, MediumInterface(), alloc.new_object<ConstantSpectrum>(r()), 1.f,
-                tris[0], nullptr, Image(), nullptr, false /* two sided */, Allocator()));
+                tris[0], nullptr, Image(), nullptr, false /* two sided */));
             allTris.push_back(tris[0]);
         }
 
@@ -268,7 +268,7 @@ static std::tuple<std::vector<Light>, std::vector<Shape>> randomLights(
                        Lerp(rng.Uniform<Float>(), -5, 5)};
             lights.push_back(new PointLight(Translate(p), MediumInterface(),
                                             alloc.new_object<ConstantSpectrum>(r()),
-                                            1.f, Allocator()));
+                                            1.f));
         }
     }
 
@@ -293,7 +293,7 @@ TEST(BVHLightSampling, PdfMethod) {
             // It's actually legit to sometimes get no lights; as the bounds
             // tighten up as we get deeper in the tree, it may turn out that
             // the path we followed didn't have any lights after all.
-            EXPECT_FLOAT_EQ(sampledLight->pdf, distrib.PDF(intr, sampledLight->light));
+            EXPECT_FLOAT_EQ(sampledLight->p, distrib.PMF(intr, sampledLight->light));
     }
 }
 
@@ -312,7 +312,7 @@ TEST(ExhaustiveLightSampling, PdfMethod) {
         pstd::optional<SampledLight> sampledLight =
             distrib.Sample(intr, rng.Uniform<Float>());
         ASSERT_TRUE((bool)sampledLight) << i << " - " << p;
-        EXPECT_FLOAT_EQ(sampledLight->pdf, distrib.PDF(intr, sampledLight->light));
+        EXPECT_FLOAT_EQ(sampledLight->p, distrib.PMF(intr, sampledLight->light));
     }
 }
 
@@ -331,7 +331,7 @@ TEST(UniformLightSampling, PdfMethod) {
         pstd::optional<SampledLight> sampledLight =
             distrib.Sample(intr, rng.Uniform<Float>());
         ASSERT_TRUE((bool)sampledLight) << i << " - " << p;
-        EXPECT_FLOAT_EQ(sampledLight->pdf, distrib.PDF(intr, sampledLight->light));
+        EXPECT_FLOAT_EQ(sampledLight->p, distrib.PMF(intr, sampledLight->light));
     }
 }
 
@@ -350,6 +350,6 @@ TEST(PowerLightSampling, PdfMethod) {
         pstd::optional<SampledLight> sampledLight =
             distrib.Sample(intr, rng.Uniform<Float>());
         ASSERT_TRUE((bool)sampledLight) << i << " - " << p;
-        EXPECT_FLOAT_EQ(sampledLight->pdf, distrib.PDF(intr, sampledLight->light));
+        EXPECT_FLOAT_EQ(sampledLight->p, distrib.PMF(intr, sampledLight->light));
     }
 }

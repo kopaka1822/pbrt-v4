@@ -33,7 +33,7 @@ using namespace pbrt;
 
 /* Resolution of the frequency table discretization. The azimuthal
    resolution is twice this value. */
-#define CHI2_THETA_RES 10
+#define CHI2_THETA_RES 80
 #define CHI2_PHI_RES (2 * CHI2_THETA_RES)
 
 /* Number of MC samples to compute the observed frequency table */
@@ -439,34 +439,73 @@ TEST(BSDFSampling, Lambertian) {
     TestBSDF(createLambertian, "Lambertian");
 }
 
-#if 0
-BSDF* createMicrofacet(const SurfaceInteraction& si, Allocator alloc, float roughx,
-                       float roughy) {
+#if 1
+BSDF* createConductorMicrofacet(const SurfaceInteraction& si, Allocator alloc, float eta,
+                                float k, float roughx, float roughy) {
     Float alphax = TrowbridgeReitzDistribution::RoughnessToAlpha(roughx);
     Float alphay = TrowbridgeReitzDistribution::RoughnessToAlpha(roughy);
     TrowbridgeReitzDistribution distrib(alphax, alphay);
-    FresnelHandle fresnel = alloc.new_object<FresnelDielectric>(1.5, true);
     return alloc.new_object<BSDF>(si.shading.n, si.shading.dpdu,
-        alloc.new_object<MicrofacetReflectionBxDF>(distrib, fresnel));
-    // CO    return alloc.new_object<BSDF>(si,
-    // alloc.new_object<DielectricInterface>(1.5, distrib,
-    // TransportMode::Radiance));
+        alloc.new_object<ConductorBxDF>(distrib, SampledSpectrum(eta), SampledSpectrum(k)));
 }
 
-TEST(BSDFSampling, TR_VA_0p5) {
-    TestBSDF(
-        [](const SurfaceInteraction& si, Allocator alloc) -> BSDF* {
-            return createMicrofacet(si, alloc, 0.5, 0.5);
-        },
-        "Trowbridge-Reitz, visible area sample, alpha = 0.5");
+BSDF* createDielectricMicrofacet(const SurfaceInteraction& si, Allocator alloc, float ior,
+                                 float roughx, float roughy) {
+    Float alphax = TrowbridgeReitzDistribution::RoughnessToAlpha(roughx);
+    Float alphay = TrowbridgeReitzDistribution::RoughnessToAlpha(roughy);
+    TrowbridgeReitzDistribution distrib(alphax, alphay);
+    return alloc.new_object<BSDF>(si.shading.n, si.shading.dpdu,
+        alloc.new_object<DielectricBxDF>(ior, distrib));
 }
 
-TEST(BSDFSampling, TR_VA_0p3_0p15) {
+TEST(BSDFSampling, TRCondIso) {
     TestBSDF(
         [](const SurfaceInteraction& si, Allocator alloc) -> BSDF* {
-            return createMicrofacet(si, alloc, 0.3, 0.15);
+            return createConductorMicrofacet(si, alloc, 2.f, 4.f, 0.5, 0.5);
         },
-        "Trowbridge-Reitz, visible area sample, alpha = 0.3/0.15");
+        "TRCondIso");
+}
+
+TEST(BSDFSampling, TRCondAniso) {
+    TestBSDF(
+        [](const SurfaceInteraction& si, Allocator alloc) -> BSDF* {
+            return createConductorMicrofacet(si, alloc, 2.f, 4.f, 0.3, 0.15);
+        },
+        "TRCondAniso");
+}
+
+TEST(BSDFSampling, TRDielIso) {
+    TestBSDF(
+        [](const SurfaceInteraction& si, Allocator alloc) -> BSDF* {
+            return createDielectricMicrofacet(si, alloc, 1.5f, 0.5, 0.5);
+        },
+        "TRDielIso");
+}
+
+
+TEST(BSDFSampling, TRDielAniso) {
+    TestBSDF(
+        [](const SurfaceInteraction& si, Allocator alloc) -> BSDF* {
+            return createDielectricMicrofacet(si, alloc, 1.5f, 0.3, 0.15);
+        },
+        "TRDielAniso");
+}
+
+TEST(BSDFSampling, TRDielIsoInv) {
+    TestBSDF(
+        [](const SurfaceInteraction& si, Allocator alloc) -> BSDF* {
+            return createDielectricMicrofacet(si, alloc, 1/1.5f, 0.5, 0.5);
+        },
+        "TRDielIsoInv");
+}
+
+
+TEST(BSDFSampling, TRDielAnisoInv) {
+    TestBSDF(
+        [](const SurfaceInteraction& si, Allocator alloc) -> BSDF* {
+            return createDielectricMicrofacet(si, alloc, 1/1.5f, 0.3, 0.15);
+        },
+        "TRDielAnisoInv");
 }
 #endif
 
@@ -523,17 +562,6 @@ TEST(BSDFEnergyConservation, LambertianReflection) {
                 alloc.new_object<DiffuseBxDF>(SampledSpectrum(1.f)));
         },
         "LambertianReflection");
-}
-
-TEST(BSDFEnergyConservation, OrenNayar) {
-    TestEnergyConservation(
-        [](const SurfaceInteraction& si, Allocator alloc) -> BSDF* {
-            return alloc.new_object<BSDF>(
-                si.shading.n, si.shading.dpdu,
-                alloc.new_object<RoughDiffuseBxDF>(SampledSpectrum(1.f), SampledSpectrum(0.),
-                                                   20));
-        },
-        "Oren-Nayar sigma 20");
 }
 
 #if 0
@@ -657,7 +685,7 @@ TEST(Hair, WhiteFurnace) {
 
             for (int i = 0; i < count; ++i) {
                 SampledWavelengths lambda =
-                    SampledWavelengths::SampleXYZ(RadicalInverse(0, i));
+                    SampledWavelengths::SampleVisible(RadicalInverse(0, i));
 
                 Float h = Clamp(-1 + 2. * RadicalInverse(1, i), -.999999, .999999);
                 SampledSpectrum sigma_a(0.f);
@@ -688,7 +716,7 @@ TEST(Hair, HOnTheEdge) {
 
 TEST(Hair, WhiteFurnaceSampled) {
     RNG rng;
-    SampledWavelengths lambda = SampledWavelengths::SampleXYZ(0.5);
+    SampledWavelengths lambda = SampledWavelengths::SampleVisible(0.5);
     Vector3f wo = SampleUniformSphere({rng.Uniform<Float>(), rng.Uniform<Float>()});
     for (Float beta_m = .1; beta_m < 1; beta_m += .2) {
         for (Float beta_n = .1; beta_n < 1; beta_n += .2) {
@@ -697,7 +725,7 @@ TEST(Hair, WhiteFurnaceSampled) {
             int count = 10000;
             for (int i = 0; i < count; ++i) {
                 SampledWavelengths lambda =
-                    SampledWavelengths::SampleXYZ(RadicalInverse(0, i));
+                    SampledWavelengths::SampleVisible(RadicalInverse(0, i));
                 Float h = Clamp(-1 + 2. * RadicalInverse(1, i), -.999999, .999999);
 
                 SampledSpectrum sigma_a(0.f);
@@ -722,7 +750,7 @@ TEST(Hair, WhiteFurnaceSampled) {
 
 TEST(Hair, SamplingWeights) {
     RNG rng;
-    SampledWavelengths lambda = SampledWavelengths::SampleXYZ(0.5);
+    SampledWavelengths lambda = SampledWavelengths::SampleVisible(0.5);
     for (Float beta_m = .1; beta_m < 1; beta_m += .2)
         for (Float beta_n = .4; beta_n < 1; beta_n += .2) {
             int count = 10000;
@@ -743,7 +771,7 @@ TEST(Hair, SamplingWeights) {
                     Float sum = 0;
                     int ny = 20;
                     for (Float u : Stratified1D(ny)) {
-                        SampledWavelengths lambda = SampledWavelengths::SampleXYZ(u);
+                        SampledWavelengths lambda = SampledWavelengths::SampleVisible(u);
                         sum += bs->f.y(lambda) * AbsCosTheta(bs->wi) / bs->pdf;
                     }
 
@@ -759,7 +787,7 @@ TEST(Hair, SamplingWeights) {
 
 TEST(Hair, SamplingConsistency) {
     RNG rng;
-    SampledWavelengths lambda = SampledWavelengths::SampleXYZ(0.5);
+    SampledWavelengths lambda = SampledWavelengths::SampleVisible(0.5);
     for (Float beta_m = .2; beta_m < 1; beta_m += .2)
         for (Float beta_n = .4; beta_n < 1; beta_n += .2) {
             // Declare variables for hair sampling test

@@ -24,8 +24,8 @@
 namespace pbrt {
 
 std::string SampledLight::ToString() const {
-    return StringPrintf("[ SampledLight light: %s pdf: %f ]",
-                        light ? light.ToString().c_str() : "(nullptr)", pdf);
+    return StringPrintf("[ SampledLight light: %s p: %f ]",
+                        light ? light.ToString().c_str() : "(nullptr)", p);
 }
 
 std::string CompactLightBounds::ToString() const {
@@ -74,8 +74,8 @@ std::string LightSampler::ToString() const {
 
 // PowerLightSampler Method Definitions
 PowerLightSampler::PowerLightSampler(pstd::span<const Light> lights, Allocator alloc)
-    : lightToIndex(alloc),
-      lights(lights.begin(), lights.end(), alloc),
+    : lights(lights.begin(), lights.end(), alloc),
+      lightToIndex(alloc),
       aliasTable(alloc) {
     if (lights.empty())
         return;
@@ -84,8 +84,8 @@ PowerLightSampler::PowerLightSampler(pstd::span<const Light> lights, Allocator a
         lightToIndex.Insert(lights[i], i);
 
     // Compute lights' power and initialize alias table
-    std::vector<Float> lightPower;
-    SampledWavelengths lambda = SampledWavelengths::SampleXYZ(0.5f);
+    pstd::vector<Float> lightPower;
+    SampledWavelengths lambda = SampledWavelengths::SampleVisible(0.5f);
     for (const auto &light : lights) {
         SampledSpectrum phi = SafeDiv(light.Phi(lambda), lambda.PDF());
         lightPower.push_back(phi.Average());
@@ -114,7 +114,7 @@ BVHLightSampler::BVHLightSampler(pstd::span<const Light> lights, Allocator alloc
     // Initialize _infiniteLights_ array and light BVH
     std::vector<std::pair<int, LightBounds>> bvhLights;
     for (size_t i = 0; i < lights.size(); ++i) {
-        // Partition $i$th light into _infiniteLights_ or _bvhLights_
+        // Store $i$th light in either _infiniteLights_ or _bvhLights_
         Light light = lights[i];
         pstd::optional<LightBounds> lightBounds = light.Bounds();
         if (!lightBounds)
@@ -125,14 +125,17 @@ BVHLightSampler::BVHLightSampler(pstd::span<const Light> lights, Allocator alloc
         }
     }
     if (!bvhLights.empty())
-        buildBVH(bvhLights, 0, bvhLights.size(), 0, 0, alloc);
-    lightBVHBytes += nodes.size() * sizeof(LightBVHNode);
+        buildBVH(bvhLights, 0, bvhLights.size(), 0, 0);
+    lightBVHBytes += nodes.size() * sizeof(LightBVHNode) +
+                     lightToBitTrail.capacity() * sizeof(uint32_t) +
+                     lights.size() * sizeof(Light) +
+                     infiniteLights.size() * sizeof(Light);
 }
 
 std::pair<int, LightBounds> BVHLightSampler::buildBVH(
     std::vector<std::pair<int, LightBounds>> &bvhLights, int start, int end,
-    uint32_t bitTrail, int depth, Allocator alloc) {
-    CHECK_LT(start, end);
+    uint32_t bitTrail, int depth) {
+    DCHECK_LT(start, end);
     // Initialize leaf node if only a single light remains
     if (end - start == 1) {
         int nodeIndex = nodes.size();
@@ -166,8 +169,8 @@ std::pair<int, LightBounds> BVHLightSampler::buildBVH(
             int b = nBuckets * centroidBounds.Offset(pc)[dim];
             if (b == nBuckets)
                 b = nBuckets - 1;
-            CHECK_GE(b, 0);
-            CHECK_LT(b, nBuckets);
+            DCHECK_GE(b, 0);
+            DCHECK_LT(b, nBuckets);
             bucketLightBounds[b] = Union(bucketLightBounds[b], bvhLights[i].second);
         }
 
@@ -197,9 +200,9 @@ std::pair<int, LightBounds> BVHLightSampler::buildBVH(
 
     // Partition lights according to chosen split
     int mid;
-    if (minCostSplitDim == -1) {
+    if (minCostSplitDim == -1)
         mid = (start + end) / 2;
-    } else {
+    else {
         const auto *pmid = std::partition(
             &bvhLights[start], &bvhLights[end - 1] + 1,
             [=](const std::pair<int, LightBounds> &l) {
@@ -207,14 +210,14 @@ std::pair<int, LightBounds> BVHLightSampler::buildBVH(
                         centroidBounds.Offset(l.second.Centroid())[minCostSplitDim];
                 if (b == nBuckets)
                     b = nBuckets - 1;
-                CHECK_GE(b, 0);
-                CHECK_LT(b, nBuckets);
+                DCHECK_GE(b, 0);
+                DCHECK_LT(b, nBuckets);
                 return b <= minCostSplitBucket;
             });
         mid = pmid - &bvhLights[0];
         if (mid == start || mid == end)
             mid = (start + end) / 2;
-        CHECK(mid > start && mid < end);
+        DCHECK(mid > start && mid < end);
     }
 
     // Allocate interior _LightBVHNode_ and recursively initialize children
@@ -222,10 +225,10 @@ std::pair<int, LightBounds> BVHLightSampler::buildBVH(
     nodes.push_back(LightBVHNode());
     CHECK_LT(depth, 64);
     std::pair<int, LightBounds> child0 =
-        buildBVH(bvhLights, start, mid, bitTrail, depth + 1, alloc);
-    CHECK_EQ(nodeIndex + 1, child0.first);
+        buildBVH(bvhLights, start, mid, bitTrail, depth + 1);
+    DCHECK_EQ(nodeIndex + 1, child0.first);
     std::pair<int, LightBounds> child1 =
-        buildBVH(bvhLights, mid, end, bitTrail | (1u << depth), depth + 1, alloc);
+        buildBVH(bvhLights, mid, end, bitTrail | (1u << depth), depth + 1);
 
     // Initialize interior node and return node index and bounds
     LightBounds lb = Union(child0.second, child1.second);
@@ -269,7 +272,7 @@ pstd::optional<SampledLight> ExhaustiveLightSampler::Sample(const LightSampleCon
 
     // Note: shared with BVH light sampler...
     if (u < pInfinite) {
-        u = std::min<Float>(u * pInfinite, OneMinusEpsilon);
+        u /= pInfinite;
         int index = std::min<int>(u * infiniteLights.size(), infiniteLights.size() - 1);
         Float pdf = pInfinite * 1.f / infiniteLights.size();
         return SampledLight{infiniteLights[index], pdf};
@@ -285,12 +288,12 @@ pstd::optional<SampledLight> ExhaustiveLightSampler::Sample(const LightSampleCon
         if (!wrs.HasSample())
             return {};
 
-        Float pdf = (1.f - pInfinite) * wrs.SamplePDF();
+        Float pdf = (1.f - pInfinite) * wrs.SampleProbability();
         return SampledLight{wrs.GetSample(), pdf};
     }
 }
 
-Float ExhaustiveLightSampler::PDF(const LightSampleContext &ctx, Light light) const {
+Float ExhaustiveLightSampler::PMF(const LightSampleContext &ctx, Light light) const {
     if (!lightToBoundedIndex.HasKey(light))
         return 1.f / (infiniteLights.size() + (!lightBounds.empty() ? 1 : 0));
 

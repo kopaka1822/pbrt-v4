@@ -15,8 +15,8 @@
 
 namespace pbrt {
 
-std::vector<Sampler> Sampler::Clone(int n, Allocator alloc) {
-    auto clone = [&](auto ptr) { return ptr->Clone(n, alloc); };
+Sampler Sampler::Clone(Allocator alloc) {
+    auto clone = [&](auto ptr) { return ptr->Clone(alloc); };
     return DispatchCPU(clone);
 }
 
@@ -51,14 +51,8 @@ HaltonSampler::HaltonSampler(int samplesPerPixel, Point2i fullRes,
     multInverse[1] = multiplicativeInverse(baseScales[0], baseScales[1]);
 }
 
-std::vector<Sampler> HaltonSampler::Clone(int n, Allocator alloc) {
-    std::vector<Sampler> samplers(n);
-    HaltonSampler *samplerMem = (HaltonSampler *)alloc.allocate_object<HaltonSampler>(n);
-    for (int i = 0; i < n; ++i) {
-        alloc.construct(&samplerMem[i], *this);
-        samplers[i] = &samplerMem[i];
-    }
-    return samplers;
+Sampler HaltonSampler::Clone(Allocator alloc) {
+    return alloc.new_object<HaltonSampler>(*this);
 }
 
 std::string HaltonSampler::ToString() const {
@@ -91,21 +85,14 @@ HaltonSampler *HaltonSampler::Create(const ParameterDictionary &parameters,
     else if (s == "owen")
         randomizer = RandomizeStrategy::Owen;
     else
-        ErrorExit(loc, "%s: unknown randomization strategy given to PaddedSobolSampler",
-                  s);
+        ErrorExit(loc, "%s: unknown randomization strategy given to HaltonSampler", s);
 
     return alloc.new_object<HaltonSampler>(nsamp, fullResolution, randomizer, seed,
                                            alloc);
 }
 
-std::vector<Sampler> SobolSampler::Clone(int n, Allocator alloc) {
-    std::vector<Sampler> samplers(n);
-    SobolSampler *samplerMem = (SobolSampler *)alloc.allocate_object<SobolSampler>(n);
-    for (int i = 0; i < n; ++i) {
-        alloc.construct(&samplerMem[i], *this);
-        samplers[i] = &samplerMem[i];
-    }
-    return samplers;
+Sampler SobolSampler::Clone(Allocator alloc) {
+    return alloc.new_object<SobolSampler>(*this);
 }
 
 std::string PaddedSobolSampler::ToString() const {
@@ -114,15 +101,8 @@ std::string PaddedSobolSampler::ToString() const {
                         pixel, sampleIndex, dimension, samplesPerPixel, seed, randomize);
 }
 
-std::vector<Sampler> PaddedSobolSampler::Clone(int n, Allocator alloc) {
-    std::vector<Sampler> samplers(n);
-    PaddedSobolSampler *samplerMem =
-        (PaddedSobolSampler *)alloc.allocate_object<PaddedSobolSampler>(n);
-    for (int i = 0; i < n; ++i) {
-        alloc.construct(&samplerMem[i], *this);
-        samplers[i] = &samplerMem[i];
-    }
-    return samplers;
+Sampler PaddedSobolSampler::Clone(Allocator alloc) {
+    return alloc.new_object<PaddedSobolSampler>(*this);
 }
 
 PaddedSobolSampler *PaddedSobolSampler::Create(const ParameterDictionary &parameters,
@@ -152,14 +132,8 @@ PaddedSobolSampler *PaddedSobolSampler::Create(const ParameterDictionary &parame
 }
 
 // ZSobolSampler Method Definitions
-std::vector<Sampler> ZSobolSampler::Clone(int n, Allocator alloc) {
-    std::vector<Sampler> samplers(n);
-    ZSobolSampler *samplerMem = (ZSobolSampler *)alloc.allocate_object<ZSobolSampler>(n);
-    for (int i = 0; i < n; ++i) {
-        alloc.construct(&samplerMem[i], *this);
-        samplers[i] = &samplerMem[i];
-    }
-    return samplers;
+Sampler ZSobolSampler::Clone(Allocator alloc) {
+    return alloc.new_object<ZSobolSampler>(*this);
 }
 
 std::string ZSobolSampler::ToString() const {
@@ -243,15 +217,8 @@ PMJ02BNSampler *PMJ02BNSampler::Create(const ParameterDictionary &parameters,
     return alloc.new_object<PMJ02BNSampler>(nsamp, seed, alloc);
 }
 
-std::vector<Sampler> PMJ02BNSampler::Clone(int n, Allocator alloc) {
-    std::vector<Sampler> samplers(n);
-    PMJ02BNSampler *samplerMem =
-        (PMJ02BNSampler *)alloc.allocate_object<PMJ02BNSampler>(n);
-    for (int i = 0; i < n; ++i) {
-        alloc.construct(&samplerMem[i], *this);
-        samplers[i] = &samplerMem[i];
-    }
-    return samplers;
+Sampler PMJ02BNSampler::Clone(Allocator alloc) {
+    return alloc.new_object<PMJ02BNSampler>(*this);
 }
 
 std::string PMJ02BNSampler::ToString() const {
@@ -266,15 +233,8 @@ std::string IndependentSampler::ToString() const {
                         samplesPerPixel, seed, rng);
 }
 
-std::vector<Sampler> IndependentSampler::Clone(int n, Allocator alloc) {
-    std::vector<Sampler> samplers(n);
-    IndependentSampler *samplerMem =
-        (IndependentSampler *)alloc.allocate_object<IndependentSampler>(n);
-    for (int i = 0; i < n; ++i) {
-        alloc.construct(&samplerMem[i], *this);
-        samplers[i] = &samplerMem[i];
-    }
-    return samplers;
+Sampler IndependentSampler::Clone(Allocator alloc) {
+    return alloc.new_object<IndependentSampler>(*this);
 }
 
 IndependentSampler *IndependentSampler::Create(const ParameterDictionary &parameters,
@@ -330,15 +290,8 @@ std::string StratifiedSampler::ToString() const {
         pixel, sampleIndex, dimension, xPixelSamples, yPixelSamples, jitter, seed, rng);
 }
 
-std::vector<Sampler> StratifiedSampler::Clone(int n, Allocator alloc) {
-    std::vector<Sampler> samplers(n);
-    StratifiedSampler *samplerMem =
-        (StratifiedSampler *)alloc.allocate_object<StratifiedSampler>(n);
-    for (int i = 0; i < n; ++i) {
-        alloc.construct(&samplerMem[i], *this);
-        samplers[i] = &samplerMem[i];
-    }
-    return samplers;
+Sampler StratifiedSampler::Clone(Allocator alloc) {
+    return alloc.new_object<StratifiedSampler>(*this);
 }
 
 StratifiedSampler *StratifiedSampler::Create(const ParameterDictionary &parameters,
@@ -379,7 +332,7 @@ Point2f MLTSampler::GetPixel2D() {
     return Get2D();
 }
 
-std::vector<Sampler> MLTSampler::Clone(int n, Allocator alloc) {
+Sampler MLTSampler::Clone(Allocator alloc) {
     LOG_FATAL("MLTSampler::Clone() is not implemented");
     return {};
 }
@@ -480,10 +433,10 @@ Sampler Sampler::Create(const std::string &name, const ParameterDictionary &para
         sampler = StratifiedSampler::Create(parameters, loc, alloc);
     else
         ErrorExit(loc, "%s: sampler type unknown.", name);
-
     if (!sampler)
         ErrorExit(loc, "%s: unable to create sampler.", name);
     parameters.ReportUnused();
+
     return sampler;
 }
 

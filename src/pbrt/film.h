@@ -210,7 +210,7 @@ class FilmBase {
 
     PBRT_CPU_GPU
     SampledWavelengths SampleWavelengths(Float u) const {
-        return SampledWavelengths::SampleXYZ(u);
+        return SampledWavelengths::SampleVisible(u);
     }
 
     PBRT_CPU_GPU
@@ -243,9 +243,8 @@ class RGBFilm : public FilmBase {
 
         // Optionally clamp sensor RGB value
         Float m = std::max({rgb.r, rgb.g, rgb.b});
-        if (m > maxComponentValue) {
+        if (m > maxComponentValue)
             rgb *= maxComponentValue / m;
-        }
 
         DCHECK(InsideExclusive(pFilm, pixelBounds));
         // Update pixel values with filtered sample contribution
@@ -373,7 +372,7 @@ class GBufferFilm : public FilmBase {
     struct Pixel {
         Pixel() = default;
         double rgbSum[3] = {0., 0., 0.};
-        double weightSum = 0.;
+        double weightSum = 0., gBufferWeightSum = 0.;
         AtomicDouble rgbSplat[3];
         Point3f pSum;
         Float dzdxSum = 0, dzdySum = 0;

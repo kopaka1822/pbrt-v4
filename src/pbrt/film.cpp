@@ -28,6 +28,8 @@
 #include <pbrt/util/stats.h>
 #include <pbrt/util/transform.h>
 
+#include <algorithm>
+
 namespace pbrt {
 
 void Film::AddSplat(Point2f p, SampledSpectrum v, const SampledWavelengths &lambda) {
@@ -491,9 +493,8 @@ void RGBFilm::AddSplat(Point2f p, SampledSpectrum L, const SampledWavelengths &l
 
     // Optionally clamp sensor RGB value
     Float m = std::max({rgb.r, rgb.g, rgb.b});
-    if (m > maxComponentValue) {
+    if (m > maxComponentValue)
         rgb *= maxComponentValue / m;
-    }
 
     // Compute bounds of affected pixels for splat, _splatBounds_
     Point2f pDiscrete = p + Vector2f(0.5, 0.5);
@@ -584,6 +585,8 @@ void GBufferFilm::AddSample(Point2i pFilm, SampledSpectrum L,
 
     Pixel &p = pixels[pFilm];
     if (visibleSurface && *visibleSurface) {
+        p.gBufferWeightSum += weight;
+
         // Update variance estimates.
         for (int c = 0; c < 3; ++c)
             p.rgbVariance[c].Add(rgb[c]);
@@ -724,17 +727,19 @@ Image GBufferFilm::GetImage(ImageMetadata *metadata, Float splatScale) {
                       pixel.rgbAlbedoSum[2]);
 
         // Normalize pixel with weight sum
-        Float weightSum = pixel.weightSum;
+        Float weightSum = pixel.weightSum, gBufferWeightSum = pixel.gBufferWeightSum;
         Point3f pt = pixel.pSum;
         Point2f uv = pixel.uvSum;
         Float dzdx = pixel.dzdxSum, dzdy = pixel.dzdySum;
         if (weightSum != 0) {
             rgb /= weightSum;
             albedoRgb /= weightSum;
-            pt /= weightSum;
-            uv /= weightSum;
-            dzdx /= weightSum;
-            dzdy /= weightSum;
+        }
+        if (gBufferWeightSum != 0) {
+            pt /= gBufferWeightSum;
+            uv /= gBufferWeightSum;
+            dzdx /= gBufferWeightSum;
+            dzdy /= gBufferWeightSum;
         }
 
         // Add splat value at pixel

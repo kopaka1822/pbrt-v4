@@ -81,44 +81,17 @@ class DiffuseBxDF {
     SampledSpectrum R;
 };
 
-// RoughDiffuseBxDF Definition
-class RoughDiffuseBxDF {
+// DiffuseTransmissionBxDF Definition
+class DiffuseTransmissionBxDF {
   public:
-    // RoughDiffuseBxDF Public Methods
-    RoughDiffuseBxDF() = default;
+    // DiffuseTransmissionBxDF Public Methods
+    DiffuseTransmissionBxDF() = default;
     PBRT_CPU_GPU
-    RoughDiffuseBxDF(SampledSpectrum R, SampledSpectrum T, Float sigma) : R(R), T(T) {
-        Float sigma2 = Sqr(Radians(sigma));
-        A = 1 - sigma2 / (2 * (sigma2 + 0.33f));
-        B = 0.45f * sigma2 / (sigma2 + 0.09f);
-    }
+    DiffuseTransmissionBxDF(SampledSpectrum R, SampledSpectrum T) : R(R), T(T) {}
 
     PBRT_CPU_GPU
     SampledSpectrum f(Vector3f wo, Vector3f wi, TransportMode mode) const {
-        // Return Lambertian BRDF for zero-roughness Oren--Nayar BRDF
-        if (B == 0)
-            return SameHemisphere(wo, wi) ? (R * InvPi) : (T * InvPi);
-
-        if ((SameHemisphere(wo, wi) && !R) || (!SameHemisphere(wo, wi) && !T))
-            return SampledSpectrum(0.f);
-        // Evaluate Oren--Nayar BRDF for given directions
-        Float sinTheta_i = SinTheta(wi), sinTheta_o = SinTheta(wo);
-        Float maxCos = std::max<Float>(0, CosDPhi(wi, wo));
-        // Compute $\sin \alpha$ and $\tan \beta$ terms of Oren--Nayar model
-        Float sinAlpha, tanBeta;
-        if (AbsCosTheta(wi) > AbsCosTheta(wo)) {
-            sinAlpha = sinTheta_o;
-            tanBeta = sinTheta_i / AbsCosTheta(wi);
-        } else {
-            sinAlpha = sinTheta_i;
-            tanBeta = sinTheta_o / AbsCosTheta(wo);
-        }
-
-        // Return final Oren--Nayar BSDF value
-        if (SameHemisphere(wo, wi))
-            return R * InvPi * (A + B * maxCos * sinAlpha * tanBeta);
-        else
-            return T * InvPi * (A + B * maxCos * sinAlpha * tanBeta);
+        return SameHemisphere(wo, wi) ? (R * InvPi) : (T * InvPi);
     }
 
     PBRT_CPU_GPU
@@ -172,7 +145,7 @@ class RoughDiffuseBxDF {
     }
 
     PBRT_CPU_GPU
-    static constexpr const char *Name() { return "RoughDiffuseBxDF"; }
+    static constexpr const char *Name() { return "DiffuseTransmissionBxDF"; }
 
     std::string ToString() const;
 
@@ -186,9 +159,8 @@ class RoughDiffuseBxDF {
     }
 
   private:
-    // RoughDiffuseBxDF Private Members
+    // DiffuseTransmissionBxDF Private Members
     SampledSpectrum R, T;
-    Float A, B;
 };
 
 // DielectricBxDF Definition
@@ -217,7 +189,6 @@ class DielectricBxDF {
 
     PBRT_CPU_GPU
     SampledSpectrum f(Vector3f wo, Vector3f wi, TransportMode mode) const;
-
     PBRT_CPU_GPU
     Float PDF(Vector3f wo, Vector3f wi, TransportMode mode,
               BxDFReflTransFlags sampleFlags = BxDFReflTransFlags::All) const;
@@ -253,7 +224,7 @@ class ThinDielectricBxDF {
     pstd::optional<BSDFSample> Sample_f(Vector3f wo, Float uc, Point2f u,
                                         TransportMode mode,
                                         BxDFReflTransFlags sampleFlags) const {
-        Float R = FrDielectric(CosTheta(wo), eta), T = 1 - R;
+        Float R = FrDielectric(AbsCosTheta(wo), eta), T = 1 - R;
         // Compute _R_ and _T_ accounting for scattering between interfaces
         if (R < 1) {
             R += T * T * R / (1 - R * R);
@@ -270,7 +241,7 @@ class ThinDielectricBxDF {
             return {};
 
         if (uc < pr / (pr + pt)) {
-            // Sample perfect specular reflection at thin dielectric interface
+            // Sample perfect specular dielectric BRDF
             Vector3f wi(-wo.x, -wo.y, wo.z);
             SampledSpectrum fr(R / AbsCosTheta(wi));
             return BSDFSample(fr, wi, pr / (pr + pt), BxDFFlags::SpecularReflection);
@@ -336,26 +307,25 @@ class ConductorBxDF {
             return BSDFSample(f, wi, 1, BxDFFlags::SpecularReflection);
         }
         // Sample rough conductor BRDF
-        // Sample microfacet orientation $\wh$ and reflected direction $\wi$
+        // Sample microfacet normal $\wm$ and reflected direction $\wi$
         if (wo.z == 0)
             return {};
-        Vector3f wh = mfDistrib.Sample_wm(wo, u);
-        Vector3f wi = Reflect(wo, wh);
+        Vector3f wm = mfDistrib.Sample_wm(wo, u);
+        Vector3f wi = Reflect(wo, wm);
         if (!SameHemisphere(wo, wi))
             return {};
 
         // Compute PDF of _wi_ for microfacet reflection
-        Float pdf = mfDistrib.PDF(wo, wh) / (4 * AbsDot(wo, wh));
+        Float pdf = mfDistrib.PDF(wo, wm) / (4 * AbsDot(wo, wm));
 
         Float cosTheta_o = AbsCosTheta(wo), cosTheta_i = AbsCosTheta(wi);
         if (cosTheta_i == 0 || cosTheta_o == 0)
             return {};
         // Evaluate Fresnel factor _F_ for conductor BRDF
-        Float frCosTheta_i = AbsDot(wi, wh);
-        SampledSpectrum F = FrComplex(frCosTheta_i, eta, k);
+        SampledSpectrum F = FrComplex(AbsDot(wo, wm), eta, k);
 
         SampledSpectrum f =
-            mfDistrib.D(wh) * mfDistrib.G(wo, wi) * F / (4 * cosTheta_i * cosTheta_o);
+            mfDistrib.D(wm) * mfDistrib.G(wo, wi) * F / (4 * cosTheta_i * cosTheta_o);
         return BSDFSample(f, wi, pdf, BxDFFlags::GlossyReflection);
     }
 
@@ -366,20 +336,19 @@ class ConductorBxDF {
         if (mfDistrib.EffectivelySmooth())
             return {};
         // Evaluate rough conductor BRDF
-        // Compute cosines and $\wh$ for conductor BRDF
+        // Compute cosines and $\wm$ for conductor BRDF
         Float cosTheta_o = AbsCosTheta(wo), cosTheta_i = AbsCosTheta(wi);
         if (cosTheta_i == 0 || cosTheta_o == 0)
             return {};
-        Vector3f wh = wi + wo;
-        if (wh.x == 0 && wh.y == 0 && wh.z == 0)
+        Vector3f wm = wi + wo;
+        if (wm.x == 0 && wm.y == 0 && wm.z == 0)
             return {};
-        wh = Normalize(wh);
+        wm = Normalize(wm);
 
         // Evaluate Fresnel factor _F_ for conductor BRDF
-        Float frCosTheta_i = AbsDot(wi, wh);
-        SampledSpectrum F = FrComplex(frCosTheta_i, eta, k);
+        SampledSpectrum F = FrComplex(AbsDot(wo, wm), eta, k);
 
-        return mfDistrib.D(wh) * mfDistrib.G(wo, wi) * F / (4 * cosTheta_i * cosTheta_o);
+        return mfDistrib.D(wm) * mfDistrib.G(wo, wi) * F / (4 * cosTheta_i * cosTheta_o);
     }
 
     PBRT_CPU_GPU
@@ -693,7 +662,7 @@ class LayeredBxDF {
 
     PBRT_CPU_GPU
     pstd::optional<BSDFSample> Sample_f(
-        Vector3f wo, Float uc, const Point2f &u, TransportMode mode,
+        Vector3f wo, Float uc, Point2f u, TransportMode mode,
         BxDFReflTransFlags sampleFlags = BxDFReflTransFlags::All) const {
         CHECK(sampleFlags == BxDFReflTransFlags::All);  // for now
         // Set _wo_ for layered BSDF sampling
@@ -712,6 +681,7 @@ class LayeredBxDF {
         if (bs->IsReflection()) {
             if (flipWi)
                 bs->wi = -bs->wi;
+            bs->pdfIsProportional = true;
             return bs;
         }
         Vector3f w = bs->wi;
@@ -1114,8 +1084,8 @@ class NormalizedFresnelBxDF {
     NormalizedFresnelBxDF(Float eta) : eta(eta) {}
 
     PBRT_CPU_GPU
-    BSDFSample Sample_f(const Vector3f &wo, Float uc, const Point2f &u,
-                        TransportMode mode, BxDFReflTransFlags sampleFlags) const {
+    BSDFSample Sample_f(Vector3f wo, Float uc, Point2f u, TransportMode mode,
+                        BxDFReflTransFlags sampleFlags) const {
         if (!(sampleFlags & BxDFReflTransFlags::Reflection))
             return {};
 
@@ -1128,7 +1098,7 @@ class NormalizedFresnelBxDF {
     }
 
     PBRT_CPU_GPU
-    Float PDF(const Vector3f &wo, const Vector3f &wi, TransportMode mode,
+    Float PDF(Vector3f wo, Vector3f wi, TransportMode mode,
               BxDFReflTransFlags sampleFlags) const {
         if (!(sampleFlags & BxDFReflTransFlags::Reflection))
             return 0;
@@ -1149,7 +1119,7 @@ class NormalizedFresnelBxDF {
     }
 
     PBRT_CPU_GPU
-    SampledSpectrum f(const Vector3f &wo, const Vector3f &wi, TransportMode mode) const {
+    SampledSpectrum f(Vector3f wo, Vector3f wi, TransportMode mode) const {
         if (!SameHemisphere(wo, wi))
             return SampledSpectrum(0.f);
         // Compute $\Sw$ factor for BSSRDF value

@@ -284,27 +284,7 @@ class VolPathIntegrator : public RayIntegrator {
     // VolPathIntegrator Private Methods
     SampledSpectrum SampleLd(const Interaction &intr, const BSDF *bsdf,
                              SampledWavelengths &lambda, Sampler sampler,
-                             SampledSpectrum T_hat, SampledSpectrum pathPDF) const;
-
-    static void Rescale(SampledSpectrum &T_hat, SampledSpectrum &uniPathPDF,
-                        SampledSpectrum &lightPathPDF) {
-        if (T_hat.MaxComponentValue() > 0x1p24f ||
-            lightPathPDF.MaxComponentValue() > 0x1p24f ||
-            uniPathPDF.MaxComponentValue() > 0x1p24f) {
-            // Downscale _T_hat_, _lightPathPDF_, and _uniPathPDF_
-            T_hat *= 1.f / 0x1p24f;
-            lightPathPDF *= 1.f / 0x1p24f;
-            uniPathPDF *= 1.f / 0x1p24f;
-        }
-        // Upscale _T_hat_, _lightPathPDF_, and _uniPathPDF_ if necessary
-        if (T_hat.MaxComponentValue() < 0x1p-24f ||
-            lightPathPDF.MaxComponentValue() < 0x1p-24f ||
-            uniPathPDF.MaxComponentValue() < 0x1p-24f) {
-            T_hat *= 0x1p24f;
-            lightPathPDF *= 0x1p24f;
-            uniPathPDF *= 0x1p24f;
-        }
-    }
+                             SampledSpectrum beta, SampledSpectrum inv_w_u) const;
 
     // VolPathIntegrator Private Members
     int maxDepth;
@@ -500,8 +480,9 @@ class SPPMIntegrator : public Integrator {
 // FunctionIntegrator Definition
 class FunctionIntegrator : public Integrator {
   public:
-    FunctionIntegrator(std::function<Float(Point2f)> func,
-                       const std::string &outputFilename, Camera camera, Sampler sampler);
+    FunctionIntegrator(std::function<double(Point2f)> func,
+                       const std::string &outputFilename, Camera camera, Sampler sampler,
+                       bool skipBad, std::string imageFilename);
 
     static std::unique_ptr<FunctionIntegrator> Create(
         const ParameterDictionary &parameters, Camera camera, Sampler sampler,
@@ -512,10 +493,12 @@ class FunctionIntegrator : public Integrator {
     std::string ToString() const;
 
   private:
-    std::function<Float(Point2f)> func;
+    std::function<double(Point2f)> func;
     std::string outputFilename;
     Camera camera;
     Sampler baseSampler;
+    bool skipBad;
+    std::string imageFilename;
 };
 
 }  // namespace pbrt

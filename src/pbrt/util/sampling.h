@@ -134,7 +134,10 @@ PBRT_CPU_GPU inline Float BilinearPDF(Point2f p, pstd::span<const Float> w) {
         return 0;
     if (w[0] + w[1] + w[2] + w[3] == 0)
         return 1;
-    return 4 * Bilerp({p[0], p[1]}, w) / (w[0] + w[1] + w[2] + w[3]);
+    return 4 *
+           ((1 - p[0]) * (1 - p[1]) * w[0] + p[0] * (1 - p[1]) * w[1] +
+            (1 - p[0]) * p[1] * w[2] + p[0] * p[1] * w[3]) /
+           (w[0] + w[1] + w[2] + w[3]);
 }
 
 PBRT_CPU_GPU inline Point2f SampleBilinear(Point2f u, pstd::span<const Float> w) {
@@ -154,13 +157,13 @@ PBRT_CPU_GPU inline Point2f InvertBilinearSample(Point2f p, pstd::span<const Flo
             InvertLinearSample(p.y, w[0] + w[1], w[2] + w[3])};
 }
 
-PBRT_CPU_GPU inline Float XYZMatchingPDF(Float lambda) {
+PBRT_CPU_GPU inline Float VisibleWavelengthsPDF(Float lambda) {
     if (lambda < 360 || lambda > 830)
         return 0;
     return 0.0039398042f / Sqr(std::cosh(0.0072f * (lambda - 538)));
 }
 
-PBRT_CPU_GPU inline Float SampleXYZMatching(Float u) {
+PBRT_CPU_GPU inline Float SampleVisibleWavelengths(Float u) {
     return 538 - 138.888889f * std::atanh(0.85691062f - 1.82750197f * u);
 }
 
@@ -236,8 +239,7 @@ inline Float InvertNormalSample(Float x, Float mu = 0, Float sigma = 1) {
     return 0.5f * (1 + std::erf((x - mu) / (sigma * Sqrt2)));
 }
 
-PBRT_CPU_GPU inline Point2f SampleTwoNormal(const Point2f &u, Float mu = 0,
-                                            Float sigma = 1) {
+PBRT_CPU_GPU inline Point2f SampleTwoNormal(Point2f u, Float mu = 0, Float sigma = 1) {
     Float r2 = -2 * std::log(1 - u[0]);
     return {mu + sigma * std::sqrt(r2 * std::cos(2 * Pi * u[1])),
             mu + sigma * std::sqrt(r2 * std::sin(2 * Pi * u[1]))};
@@ -303,21 +305,21 @@ PBRT_CPU_GPU inline Float InvertSmoothStepSample(Float x, Float a, Float b) {
     return (P(x) - P(a)) / (P(b) - P(a));
 }
 
-PBRT_CPU_GPU inline Point2f SampleUniformDiskPolar(const Point2f &u) {
+PBRT_CPU_GPU inline Point2f SampleUniformDiskPolar(Point2f u) {
     Float r = std::sqrt(u[0]);
     Float theta = 2 * Pi * u[1];
     return {r * std::cos(theta), r * std::sin(theta)};
 }
 
 PBRT_CPU_GPU
-inline Point2f InvertUniformDiskPolarSample(const Point2f &p) {
+inline Point2f InvertUniformDiskPolarSample(Point2f p) {
     Float phi = std::atan2(p.y, p.x);
     if (phi < 0)
         phi += 2 * Pi;
     return Point2f(Sqr(p.x) + Sqr(p.y), phi / (2 * Pi));
 }
 
-PBRT_CPU_GPU inline Point2f SampleUniformDiskConcentric(const Point2f &u) {
+PBRT_CPU_GPU inline Point2f SampleUniformDiskConcentric(Point2f u) {
     // Map _u_ to $[-1,1]^2$ and handle degeneracy at the origin
     Point2f uOffset = 2 * u - Vector2f(1, 1);
     if (uOffset.x == 0 && uOffset.y == 0)
@@ -336,7 +338,7 @@ PBRT_CPU_GPU inline Point2f SampleUniformDiskConcentric(const Point2f &u) {
 }
 
 PBRT_CPU_GPU
-inline Point2f InvertUniformDiskConcentricSample(const Point2f &p) {
+inline Point2f InvertUniformDiskConcentricSample(Point2f p) {
     Float theta = std::atan2(p.y, p.x);  // -pi -> pi
     Float r = std::sqrt(Sqr(p.x) + Sqr(p.y));
 
@@ -365,7 +367,7 @@ inline Point2f InvertUniformDiskConcentricSample(const Point2f &p) {
     return {(uo.x + 1) / 2, (uo.y + 1) / 2};
 }
 
-PBRT_CPU_GPU inline Vector3f SampleUniformHemisphere(const Point2f &u) {
+PBRT_CPU_GPU inline Vector3f SampleUniformHemisphere(Point2f u) {
     Float z = u[0];
     Float r = SafeSqrt(1 - Sqr(z));
     Float phi = 2 * Pi * u[1];
@@ -376,16 +378,16 @@ PBRT_CPU_GPU inline Float UniformHemispherePDF() {
     return Inv2Pi;
 }
 
-PBRT_CPU_GPU inline Point2f InvertUniformHemisphereSample(const Vector3f &v) {
-    Float phi = std::atan2(v.y, v.x);
+PBRT_CPU_GPU inline Point2f InvertUniformHemisphereSample(Vector3f w) {
+    Float phi = std::atan2(w.y, w.x);
     if (phi < 0)
         phi += 2 * Pi;
-    return Point2f(v.z, phi / (2 * Pi));
+    return Point2f(w.z, phi / (2 * Pi));
 }
 
-PBRT_CPU_GPU inline Vector3f SampleUniformSphere(const Point2f &u) {
+PBRT_CPU_GPU inline Vector3f SampleUniformSphere(Point2f u) {
     Float z = 1 - 2 * u[0];
-    Float r = SafeSqrt(1 - z * z);
+    Float r = SafeSqrt(1 - Sqr(z));
     Float phi = 2 * Pi * u[1];
     return {r * std::cos(phi), r * std::sin(phi), z};
 }
@@ -394,14 +396,14 @@ PBRT_CPU_GPU inline Float UniformSpherePDF() {
     return Inv4Pi;
 }
 
-PBRT_CPU_GPU inline Point2f InvertUniformSphereSample(const Vector3f &v) {
-    Float phi = std::atan2(v.y, v.x);
+PBRT_CPU_GPU inline Point2f InvertUniformSphereSample(Vector3f w) {
+    Float phi = std::atan2(w.y, w.x);
     if (phi < 0)
         phi += 2 * Pi;
-    return Point2f((1 - v.z) / 2, phi / (2 * Pi));
+    return Point2f((1 - w.z) / 2, phi / (2 * Pi));
 }
 
-PBRT_CPU_GPU inline Vector3f SampleCosineHemisphere(const Point2f &u) {
+PBRT_CPU_GPU inline Vector3f SampleCosineHemisphere(Point2f u) {
     Point2f d = SampleUniformDiskConcentric(u);
     Float z = SafeSqrt(1 - Sqr(d.x) - Sqr(d.y));
     return Vector3f(d.x, d.y, z);
@@ -411,25 +413,24 @@ PBRT_CPU_GPU inline Float CosineHemispherePDF(Float cosTheta) {
     return cosTheta * InvPi;
 }
 
-PBRT_CPU_GPU inline Point2f InvertCosineHemisphereSample(const Vector3f &v) {
-    return InvertUniformDiskConcentricSample({v.x, v.y});
+PBRT_CPU_GPU inline Point2f InvertCosineHemisphereSample(Vector3f w) {
+    return InvertUniformDiskConcentricSample({w.x, w.y});
 }
 
 PBRT_CPU_GPU inline Float UniformConePDF(Float cosThetaMax) {
     return 1 / (2 * Pi * (1 - cosThetaMax));
 }
 
-PBRT_CPU_GPU inline Vector3f SampleUniformCone(const Point2f &u, Float cosThetaMax) {
+PBRT_CPU_GPU inline Vector3f SampleUniformCone(Point2f u, Float cosThetaMax) {
     Float cosTheta = (1 - u[0]) + u[0] * cosThetaMax;
     Float sinTheta = SafeSqrt(1 - Sqr(cosTheta));
     Float phi = u[1] * 2 * Pi;
     return SphericalDirection(sinTheta, cosTheta, phi);
 }
 
-PBRT_CPU_GPU inline Point2f InvertUniformConeSample(const Vector3f &v,
-                                                    Float cosThetaMax) {
-    Float cosTheta = v.z;
-    Float phi = SphericalPhi(v);
+PBRT_CPU_GPU inline Point2f InvertUniformConeSample(Vector3f w, Float cosThetaMax) {
+    Float cosTheta = w.z;
+    Float phi = SphericalPhi(w);
     return {(cosTheta - 1) / (cosThetaMax - 1), phi / (2 * Pi)};
 }
 
@@ -453,7 +454,7 @@ inline Float InvertTrimmedExponentialSample(Float x, Float c, Float xMax) {
 }
 
 PBRT_CPU_GPU
-inline Vector3f SampleUniformHemisphereConcentric(const Point2f &u) {
+inline Vector3f SampleUniformHemisphereConcentric(Point2f u) {
     // Map uniform random numbers to $[-1,1]^2$
     Point2f uOffset = 2.f * u - Vector2f(1, 1);
 
@@ -564,7 +565,7 @@ class WeightedReservoirSampler {
     PBRT_CPU_GPU
     const T &GetSample() const { return reservoir; }
     PBRT_CPU_GPU
-    Float SamplePDF() const { return reservoirWeight / weightSum; }
+    Float SampleProbability() const { return reservoirWeight / weightSum; }
     PBRT_CPU_GPU
     Float WeightSum() const { return weightSum; }
 
@@ -574,9 +575,8 @@ class WeightedReservoirSampler {
     PBRT_CPU_GPU
     void Merge(const WeightedReservoirSampler &wrs) {
         DCHECK_LE(weightSum + wrs.WeightSum(), 1e80);
-        if (wrs.HasSample()) {
+        if (wrs.HasSample())
             Add(wrs.reservoir, wrs.weightSum);
-        }
     }
 
     std::string ToString() const {
@@ -699,10 +699,10 @@ class PiecewiseConstant2D {
         : PiecewiseConstant2D(data, nx, ny, Bounds2f(Point2f(0, 0), Point2f(1, 1)),
                               alloc) {}
     explicit PiecewiseConstant2D(const Array2D<Float> &data, Allocator alloc = {})
-        : PiecewiseConstant2D(pstd::span<const Float>(data), data.xSize(), data.ySize(),
+        : PiecewiseConstant2D(pstd::span<const Float>(data), data.XSize(), data.YSize(),
                               alloc) {}
     PiecewiseConstant2D(const Array2D<Float> &data, Bounds2f domain, Allocator alloc = {})
-        : PiecewiseConstant2D(pstd::span<const Float>(data), data.xSize(), data.ySize(),
+        : PiecewiseConstant2D(pstd::span<const Float>(data), data.XSize(), data.YSize(),
                               domain, alloc) {}
 
     PBRT_CPU_GPU
@@ -739,7 +739,7 @@ class PiecewiseConstant2D {
                                        domain.pMax[0], alloc);
 
         // Compute marginal sampling distribution $p[\tilde{v}]$
-        std::vector<Float> marginalFunc;
+        pstd::vector<Float> marginalFunc;
         marginalFunc.reserve(nv);
         for (int v = 0; v < nv; ++v)
             marginalFunc.push_back(pConditionalV[v].Integral());
@@ -751,8 +751,7 @@ class PiecewiseConstant2D {
     Float Integral() const { return pMarginal.Integral(); }
 
     PBRT_CPU_GPU
-    Point2f Sample(const Point2f &u, Float *pdf = nullptr,
-                   Point2i *offset = nullptr) const {
+    Point2f Sample(Point2f u, Float *pdf = nullptr, Point2i *offset = nullptr) const {
         Float pdfs[2];
         Point2i uv;
         Float d1 = pMarginal.Sample(u[1], &pdfs[1], &uv[1]);
@@ -765,7 +764,7 @@ class PiecewiseConstant2D {
     }
 
     PBRT_CPU_GPU
-    Float PDF(const Point2f &pr) const {
+    Float PDF(Point2f pr) const {
         Point2f p = Point2f(domain.Offset(pr));
         int iu =
             Clamp(int(p[0] * pConditionalV[0].size()), 0, pConditionalV[0].size() - 1);
@@ -774,7 +773,7 @@ class PiecewiseConstant2D {
     }
 
     PBRT_CPU_GPU
-    pstd::optional<Point2f> Invert(const Point2f &p) const {
+    pstd::optional<Point2f> Invert(Point2f p) const {
         pstd::optional<Float> mInv = pMarginal.Invert(p[1]);
         if (!mInv)
             return {};
@@ -804,18 +803,18 @@ class AliasTable {
     AliasTable(pstd::span<const Float> weights, Allocator alloc = {});
 
     PBRT_CPU_GPU
-    int Sample(Float u, Float *pdf = nullptr, Float *uRemapped = nullptr) const;
+    int Sample(Float u, Float *pmf = nullptr, Float *uRemapped = nullptr) const;
     std::string ToString() const;
 
     PBRT_CPU_GPU
     size_t size() const { return bins.size(); }
     PBRT_CPU_GPU
-    Float PDF(int index) const { return bins[index].pdf; }
+    Float PMF(int index) const { return bins[index].p; }
 
   private:
     // AliasTable Private Members
     struct Bin {
-        Float q, pdf;
+        Float q, p;
         int alias;
     };
     pstd::vector<Bin> bins;
@@ -827,28 +826,28 @@ class SummedAreaTable {
     // SummedAreaTable Public Methods
     SummedAreaTable(Allocator alloc) : sum(alloc) {}
     SummedAreaTable(const Array2D<Float> &values, Allocator alloc = {})
-        : sum(values.xSize(), values.ySize(), alloc) {
+        : sum(values.XSize(), values.YSize(), alloc) {
         sum(0, 0) = values(0, 0);
-        // Compute sums along first scanline and column
-        for (int x = 1; x < sum.xSize(); ++x)
+        // Compute sums along first row and column
+        for (int x = 1; x < sum.XSize(); ++x)
             sum(x, 0) = values(x, 0) + sum(x - 1, 0);
-        for (int y = 1; y < sum.ySize(); ++y)
+        for (int y = 1; y < sum.YSize(); ++y)
             sum(0, y) = values(0, y) + sum(0, y - 1);
 
         // Compute sums for the remainder of the entries
-        for (int y = 1; y < sum.ySize(); ++y)
-            for (int x = 1; x < sum.xSize(); ++x)
+        for (int y = 1; y < sum.YSize(); ++y)
+            for (int x = 1; x < sum.XSize(); ++x)
                 sum(x, y) =
                     (values(x, y) + sum(x - 1, y) + sum(x, y - 1) - sum(x - 1, y - 1));
     }
 
     PBRT_CPU_GPU
-    Float Integral(const Bounds2f &extent) const {
+    Float Integral(Bounds2f extent) const {
         double s = (((double)Lookup(extent.pMax.x, extent.pMax.y) -
                      (double)Lookup(extent.pMin.x, extent.pMax.y)) +
                     ((double)Lookup(extent.pMin.x, extent.pMin.y) -
                      (double)Lookup(extent.pMax.x, extent.pMin.y)));
-        return std::max<Float>(s / (sum.xSize() * sum.ySize()), 0);
+        return std::max<Float>(s / (sum.XSize() * sum.YSize()), 0);
     }
 
     std::string ToString() const;
@@ -858,8 +857,8 @@ class SummedAreaTable {
     PBRT_CPU_GPU
     Float Lookup(Float x, Float y) const {
         // Rescale $(x,y)$ to table resolution and compute integer coordinates
-        x *= sum.xSize();
-        y *= sum.ySize();
+        x *= sum.XSize();
+        y *= sum.YSize();
         int x0 = (int)x, y0 = (int)y;
 
         // Bilinearly interpolate between surrounding table values
@@ -877,8 +876,8 @@ class SummedAreaTable {
             return 0;
 
         // Reindex $(x,y)$ and return actual stored value
-        x = std::min(x - 1, sum.xSize() - 1);
-        y = std::min(y - 1, sum.ySize() - 1);
+        x = std::min(x - 1, sum.XSize() - 1);
+        y = std::min(y - 1, sum.YSize() - 1);
         return sum(x, y);
     }
 
@@ -895,12 +894,10 @@ class WindowedPiecewiseConstant2D {
         : sat(f, alloc), func(f, alloc) {}
 
     PBRT_CPU_GPU
-    Point2f Sample(const Point2f &u, const Bounds2f &b, Float *pdf) const {
+    pstd::optional<Point2f> Sample(Point2f u, Bounds2f b, Float *pdf) const {
         // Handle zero-valued function for windowed sampling
-        if (sat.Integral(b) == 0) {
-            *pdf = 0;
+        if (sat.Integral(b) == 0)
             return {};
-        }
 
         // Define lambda function _Px_ for marginal cumulative distribution
         Float bInt = sat.Integral(b);
@@ -912,19 +909,17 @@ class WindowedPiecewiseConstant2D {
 
         // Sample marginal windowed function in $x$
         Point2f p;
-        p.x = SampleBisection(Px, u[0], b.pMin.x, b.pMax.x, func.xSize());
+        p.x = SampleBisection(Px, u[0], b.pMin.x, b.pMax.x, func.XSize());
 
         // Sample conditional windowed function in $y$
         // Compute 2D bounds _bCond_ for conditional sampling
-        int nx = func.xSize();
+        int nx = func.XSize();
         Bounds2f bCond(Point2f(pstd::floor(p.x * nx) / nx, b.pMin.y),
                        Point2f(pstd::ceil(p.x * nx) / nx, b.pMax.y));
         if (bCond.pMin.x == bCond.pMax.x)
             bCond.pMax.x += 1.f / nx;
-        if (sat.Integral(bCond) == 0) {
-            *pdf = 0;
+        if (sat.Integral(bCond) == 0)
             return {};
-        }
 
         // Define lambda function for conditional distribution and sample $y$
         Float condIntegral = sat.Integral(bCond);
@@ -933,7 +928,7 @@ class WindowedPiecewiseConstant2D {
             by.pMax.y = y;
             return sat.Integral(by) / condIntegral;
         };
-        p.y = SampleBisection(Py, u[1], b.pMin.y, b.pMax.y, func.ySize());
+        p.y = SampleBisection(Py, u[1], b.pMin.y, b.pMax.y, func.YSize());
 
         // Compute PDF and return point sampled from windowed function
         *pdf = Eval(p) / bInt;
@@ -942,9 +937,10 @@ class WindowedPiecewiseConstant2D {
 
     PBRT_CPU_GPU
     Float PDF(Point2f p, const Bounds2f &b) const {
-        if (sat.Integral(b) == 0)
+        Float funcInt = sat.Integral(b);
+        if (funcInt == 0)
             return 0;
-        return Eval(p) / sat.Integral(b);
+        return Eval(p) / funcInt;
     }
 
   private:
@@ -970,8 +966,8 @@ class WindowedPiecewiseConstant2D {
 
     PBRT_CPU_GPU
     Float Eval(Point2f p) const {
-        Point2i pi(std::min<int>(p[0] * func.xSize(), func.xSize() - 1),
-                   std::min<int>(p[1] * func.ySize(), func.ySize() - 1));
+        Point2i pi(std::min<int>(p[0] * func.XSize(), func.XSize() - 1),
+                   std::min<int>(p[1] * func.YSize(), func.YSize() - 1));
         return func[pi];
     }
 
@@ -1409,9 +1405,9 @@ class PiecewiseLinear2D {
                 float normalization = 1.f / HProd(m_inv_patch_size);
                 if (normalize) {
                     double sum = 0.0;
-                    for (uint32_t y = 0; y < m_size.y - 1; ++y) {
+                    for (int y = 0; y < m_size.y - 1; ++y) {
                         size_t i = y * xSize;
-                        for (uint32_t x = 0; x < m_size.x - 1; ++x, ++i) {
+                        for (int x = 0; x < m_size.x - 1; ++x, ++i) {
                             float v00 = data[i], v10 = data[i + 1], v01 = data[i + xSize],
                                   v11 = data[i + 1 + xSize],
                                   avg = .25f * (v00 + v10 + v01 + v11);

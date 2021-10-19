@@ -616,7 +616,7 @@ class Point2 : public Tuple2<Point2, T> {
 };
 
 // Point2 Inline Functions
-PBRT_CPU_GPU inline Point2f InvertBilinear(Point2f p, pstd::span<const Point2f> vert);
+PBRT_CPU_GPU inline Point2f InvertBilinear(Point2f p, pstd::span<const Point2f> v);
 
 // https://www.iquilezles.org/www/articles/ibilinear/ibilinear.htm,
 // with a fix for perfect quads
@@ -881,7 +881,6 @@ template <typename T>
 template <typename U>
 Vector2<T>::Vector2(Point2<U> p) : Tuple2<pbrt::Vector2, T>(T(p.x), T(p.y)) {}
 
-// TODO: book discuss why Dot() and not e.g. a.Dot(b)
 template <typename T>
 PBRT_CPU_GPU inline auto Dot(Vector2<T> v1, Vector2<T> v2) ->
     typename TupleLength<T>::type {
@@ -1755,8 +1754,8 @@ class OctahedralVector {
             y = Encode(v.y);
         } else {
             // Encode octahedral vector with $z < 0$
-            x = Encode((1 - std::abs(v.y)) * SignNotZero(v.x));
-            y = Encode((1 - std::abs(v.x)) * SignNotZero(v.y));
+            x = Encode((1 - std::abs(v.y)) * Sign(v.x));
+            y = Encode((1 - std::abs(v.x)) * Sign(v.y));
         }
     }
 
@@ -1769,8 +1768,8 @@ class OctahedralVector {
         // Reparameterize directions in the $z<0$ portion of the octahedron
         if (v.z < 0) {
             Float xo = v.x;
-            v.x = (1 - std::abs(v.y)) * SignNotZero(xo);
-            v.y = (1 - std::abs(xo)) * SignNotZero(v.y);
+            v.x = (1 - std::abs(v.y)) * Sign(xo);
+            v.y = (1 - std::abs(xo)) * Sign(v.y);
         }
 
         return Normalize(v);
@@ -1783,7 +1782,7 @@ class OctahedralVector {
   private:
     // OctahedralVector Private Methods
     PBRT_CPU_GPU
-    static Float SignNotZero(Float v) { return (v < 0) ? -1 : 1; }
+    static Float Sign(Float v) { return std::copysign(1.f, v); }
 
     PBRT_CPU_GPU
     static uint16_t Encode(Float f) {

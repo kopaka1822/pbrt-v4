@@ -22,6 +22,7 @@
 #include <pbrt/util/rng.h>
 #include <pbrt/util/vecmath.h>
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <string>
@@ -91,7 +92,7 @@ class HaltonSampler {
                 RadicalInverse(1, haltonIndex / baseScales[1])};
     }
 
-    std::vector<Sampler> Clone(int n, Allocator alloc);
+    Sampler Clone(Allocator alloc);
     std::string ToString() const;
 
   private:
@@ -186,14 +187,17 @@ class PaddedSobolSampler {
         int dim = dimension;
         dimension += 2;
         // Return randomized 2D Sobol' sample
-        return {SampleDimension(0, index, uint32_t(hash)),
-                SampleDimension(1, index, hash >> 32)};
+        return Point2f(SampleDimension(0, index, uint32_t(hash)),
+                       SampleDimension(1, index, hash >> 32));
     }
 
     PBRT_CPU_GPU
     Point2f GetPixel2D() { return Get2D(); }
 
-    std::vector<Sampler> Clone(int n, Allocator alloc);
+    PBRT_CPU_GPU
+    RandomizeStrategy GetRandomizeStrategy() const { return randomize; }
+
+    Sampler Clone(Allocator alloc);
     std::string ToString() const;
 
   private:
@@ -290,7 +294,7 @@ class ZSobolSampler {
     PBRT_CPU_GPU
     Point2f GetPixel2D() { return Get2D(); }
 
-    std::vector<Sampler> Clone(int n, Allocator alloc);
+    Sampler Clone(Allocator alloc);
     std::string ToString() const;
 
     PBRT_CPU_GPU
@@ -422,7 +426,7 @@ class PMJ02BNSampler {
         return {std::min(u.x, OneMinusEpsilon), std::min(u.y, OneMinusEpsilon)};
     }
 
-    std::vector<Sampler> Clone(int n, Allocator alloc);
+    Sampler Clone(Allocator alloc);
     std::string ToString() const;
 
   private:
@@ -462,7 +466,7 @@ class IndependentSampler {
     PBRT_CPU_GPU
     Point2f GetPixel2D() { return Get2D(); }
 
-    std::vector<Sampler> Clone(int n, Allocator alloc);
+    Sampler Clone(Allocator alloc);
     std::string ToString() const;
 
   private:
@@ -531,7 +535,7 @@ class SobolSampler {
         return u;
     }
 
-    std::vector<Sampler> Clone(int n, Allocator alloc);
+    Sampler Clone(Allocator alloc);
     std::string ToString() const;
 
   private:
@@ -614,7 +618,7 @@ class StratifiedSampler {
     PBRT_CPU_GPU
     Point2f GetPixel2D() { return Get2D(); }
 
-    std::vector<Sampler> Clone(int n, Allocator alloc);
+    Sampler Clone(Allocator alloc);
     std::string ToString() const;
 
   private:
@@ -654,7 +658,7 @@ class MLTSampler {
     int SamplesPerPixel() const { return mutationsPerPixel; }
 
     PBRT_CPU_GPU
-    void StartPixelSample(const Point2i &p, int sampleIndex, int dim) {
+    void StartPixelSample(Point2i p, int sampleIndex, int dim) {
         rng.SetSequence(Hash(p));
         rng.Advance(sampleIndex * 65536 + dim * 8192);
     }
@@ -668,7 +672,7 @@ class MLTSampler {
     PBRT_CPU_GPU
     Point2f GetPixel2D();
 
-    std::vector<Sampler> Clone(int n, Allocator alloc);
+    Sampler Clone(Allocator alloc);
 
     PBRT_CPU_GPU
     void Accept();
@@ -793,11 +797,6 @@ template <typename S>
 inline PBRT_CPU_GPU CameraSample GetCameraSample(S sampler, Point2i pPixel,
                                                  Filter filter) {
     FilterSample fs = filter.Sample(sampler.GetPixel2D());
-    if (GetOptions().disablePixelJitter) {
-        fs.p = Point2f(0, 0);
-        fs.weight = 1;
-    }
-
     CameraSample cs;
     // Initialize _CameraSample_ member variables
     cs.pFilm = pPixel + fs.p + Vector2f(0.5f, 0.5f);
@@ -805,6 +804,12 @@ inline PBRT_CPU_GPU CameraSample GetCameraSample(S sampler, Point2i pPixel,
     cs.pLens = sampler.Get2D();
     cs.filterWeight = fs.weight;
 
+    if (GetOptions().disablePixelJitter) {
+        cs.pFilm = pPixel + Vector2f(0.5f, 0.5f);
+        cs.time = 0.5f;
+        cs.pLens = Point2f(0.5f, 0.5f);
+        cs.filterWeight = 1;
+    }
     return cs;
 }
 

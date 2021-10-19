@@ -43,36 +43,41 @@ class PhaseFunction : public TaggedPointer<HGPhaseFunction> {
 };
 
 class HomogeneousMedium;
-template <typename Provider>
-class CuboidMedium;
-class UniformGridMediumProvider;
-// UniformGridMedium Definition
-using UniformGridMedium = CuboidMedium<UniformGridMediumProvider>;
-
-class CloudMediumProvider;
-// CloudMedium Definition
-using CloudMedium = CuboidMedium<CloudMediumProvider>;
-
-class NanoVDBMediumProvider;
-// NanoVDBMedium Definition
-using NanoVDBMedium = CuboidMedium<NanoVDBMediumProvider>;
+class GridMedium;
+class RGBGridMedium;
+class CloudMedium;
+class NanoVDBMedium;
 
 struct MediumProperties;
-struct MediumSample;
 
-// MediumDensity Definition
-struct MediumDensity {
+// RayMajorantSegment Definition
+struct RayMajorantSegment {
+    Float tMin, tMax;
+    SampledSpectrum sigma_maj;
+    std::string ToString() const;
+};
+
+// RayMajorantIterator Definition
+class HomogeneousMajorantIterator;
+class DDAMajorantIterator;
+
+class RayMajorantIterator
+    : public TaggedPointer<HomogeneousMajorantIterator, DDAMajorantIterator> {
+  public:
+    using TaggedPointer::TaggedPointer;
+
     PBRT_CPU_GPU
-    MediumDensity(Float d) : sigma_a(d), sigma_s(d) {}
-    PBRT_CPU_GPU
-    MediumDensity(SampledSpectrum sigma_a, SampledSpectrum sigma_s)
-        : sigma_a(sigma_a), sigma_s(sigma_s) {}
-    SampledSpectrum sigma_a, sigma_s;
+    pstd::optional<RayMajorantSegment> Next();
+
+    std::string ToString() const;
 };
 
 // Medium Definition
-class Medium : public TaggedPointer<HomogeneousMedium, UniformGridMedium, CloudMedium,
-                                    NanoVDBMedium> {
+class Medium
+    : public TaggedPointer<  // Medium Types
+          HomogeneousMedium, CloudMedium, GridMedium, RGBGridMedium, NanoVDBMedium
+
+          > {
   public:
     // Medium Interface
     using TaggedPointer::TaggedPointer;
@@ -83,15 +88,15 @@ class Medium : public TaggedPointer<HomogeneousMedium, UniformGridMedium, CloudM
 
     std::string ToString() const;
 
+    PBRT_CPU_GPU
     bool IsEmissive() const;
 
     PBRT_CPU_GPU
-    MediumProperties Sample(Point3f p, const SampledWavelengths &lambda) const;
+    MediumProperties SamplePoint(Point3f p, const SampledWavelengths &lambda) const;
 
-    template <typename F>
-    PBRT_CPU_GPU SampledSpectrum SampleT_maj(Ray ray, Float tMax, Float u, RNG &rng,
-                                             const SampledWavelengths &lambda,
-                                             F callback) const;
+    // Medium Public Methods
+    RayMajorantIterator SampleRay(Ray ray, Float tMax, const SampledWavelengths &lambda,
+                                  ScratchBuffer &buf) const;
 };
 
 // MediumInterface Definition

@@ -29,6 +29,8 @@
 #include <cuda.h>
 #endif
 
+#include <algorithm>
+
 namespace pbrt {
 
 // Sphere Method Definitions
@@ -436,7 +438,7 @@ TriangleMesh *Triangle::CreateMesh(const Transform *renderFromObject,
 
     return alloc.new_object<TriangleMesh>(
         *renderFromObject, reverseOrientation, std::move(vi), std::move(P), std::move(S),
-        std::move(N), std::move(uvs), std::move(faceIndices));
+        std::move(N), std::move(uvs), std::move(faceIndices), alloc);
 }
 
 STAT_MEMORY_COUNTER("Memory/Curves", curveBytes);
@@ -759,84 +761,6 @@ std::string Curve::ToString() const {
     return StringPrintf("[ Curve common: %s uMin: %f uMax: %f ]", *common, uMin, uMax);
 }
 
-BilinearPatchMesh *Curve::Dice(int nSegs, Allocator alloc) const {
-    CHECK_GT(nSegs, 0);
-    std::vector<int> blpIndices;
-    std::vector<Point3f> blpP;
-    std::vector<Normal3f> blpN;
-    std::vector<Point2f> blpUV;
-
-    for (int i = 0; i <= nSegs; ++i) {
-        Float u = Lerp(Float(i) / Float(nSegs), uMin, uMax);
-
-        Vector3f dpdu;
-        Point3f p = EvaluateCubicBezier(pstd::MakeConstSpan(common->cpObj), u, &dpdu);
-        Float width = Lerp(u, common->width[0], common->width[1]);
-
-        switch (common->type) {
-        case CurveType::Ribbon: {
-            Normal3f n;
-            if (common->normalAngle == 0)
-                n = common->n[0];
-            else {
-                Float sin0 =
-                    std::sin((1 - u) * common->normalAngle) * common->invSinNormalAngle;
-                Float sin1 =
-                    std::sin(u * common->normalAngle) * common->invSinNormalAngle;
-                n = sin0 * common->n[0] + sin1 * common->n[1];
-            }
-            Vector3f dpdv = Normalize(Cross(n, dpdu)) * width;
-
-            blpP.push_back(p - dpdv / 2);
-            blpP.push_back(p + dpdv / 2);
-            blpUV.push_back(Point2f(u, 0));
-            blpUV.push_back(Point2f(u, 1));
-
-            if (i > 0) {
-                blpIndices.push_back(2 * (i - 1));
-                blpIndices.push_back(2 * (i - 1) + 1);
-                blpIndices.push_back(2 * i);
-                blpIndices.push_back(2 * i + 1);
-            }
-            break;
-        }
-        case CurveType::Flat:
-        case CurveType::Cylinder: {
-            Vector3f ortho[2];
-            CoordinateSystem(Normalize(dpdu), &ortho[0], &ortho[1]);
-            ortho[0] *= width / 2;
-            ortho[1] *= width / 2;
-
-            int nVert = 5;
-            // Repeat the first/last vertex so we can assign different
-            // texture coordinates...
-            for (int v = 0; v <= nVert; ++v) {
-                Float angle = Float(v) / nVert * 2 * Pi;
-                blpP.push_back(p + ortho[0] * std::cos(angle) +
-                               ortho[1] * std::sin(angle));
-                blpN.push_back(Normal3f(Normalize(blpP.back() - p)));
-                blpUV.push_back(Point2f(u, Float(v) / nVert));
-            }
-
-            if (i > 0) {
-                for (int v = 0; v < nVert; ++v) {
-                    // Indexing is funny due to doubled-up last vertex
-                    blpIndices.push_back((nVert + 1) * (i - 1) + v);
-                    blpIndices.push_back((nVert + 1) * (i - 1) + v + 1);
-                    blpIndices.push_back((nVert + 1) * i + v);
-                    blpIndices.push_back((nVert + 1) * i + v + 1);
-                }
-            }
-            break;
-        }
-        }
-    }
-
-    return alloc.new_object<BilinearPatchMesh>(
-        *common->renderFromObject, common->reverseOrientation, blpIndices, blpP, blpN,
-        blpUV, std::vector<int>(), nullptr);
-}
-
 pstd::vector<Shape> Curve::Create(const Transform *renderFromObject,
                                   const Transform *objectFromRender,
                                   bool reverseOrientation,
@@ -919,7 +843,9 @@ pstd::vector<Shape> Curve::Create(const Transform *renderFromObject,
         return {};
     }
 
-    int sd = parameters.GetOneInt("splitdepth", 3);
+    // This is kind of a hack, but since we dice curves on the GPU we
+    // really don't want to have them split here.
+    int sd = Options->useGPU ? 0 : parameters.GetOneInt("splitdepth", 3);
 
     if (type == CurveType::Ribbon && n.empty()) {
         Error(loc, "Must provide normals \"N\" at curve endpoints with ribbon "
@@ -1072,7 +998,7 @@ BilinearPatchMesh *BilinearPatch::CreateMesh(const Transform *renderFromObject,
 
     return alloc.new_object<BilinearPatchMesh>(
         *renderFromObject, reverseOrientation, std::move(vertexIndices), std::move(P),
-        std::move(N), std::move(uv), std::move(faceIndices), imageDist);
+        std::move(N), std::move(uv), std::move(faceIndices), imageDist, alloc);
 }
 
 pstd::vector<Shape> BilinearPatch::CreatePatches(const BilinearPatchMesh *mesh,
@@ -1452,6 +1378,7 @@ std::string BilinearPatch::ToString() const {
 STAT_COUNTER("Geometry/Spheres", nSpheres);
 STAT_COUNTER("Geometry/Cylinders", nCylinders);
 STAT_COUNTER("Geometry/Disks", nDisks);
+STAT_COUNTER("Geometry/Triangles added from displacement mapping", displacedTrisDelta);
 
 pstd::vector<Shape> Shape::Create(
     const std::string &name, const Transform *renderFromObject,
@@ -1504,6 +1431,7 @@ pstd::vector<Shape> Shape::Create(
             LOG_VERBOSE("Starting to displace mesh \"%s\" with \"%s\"", filename,
                         displacementTexName);
 
+            int origTriCount = plyMesh.triIndices.size() / 3;
             plyMesh = plyMesh.Displace(
                 [&](Point3f v0, Point3f v1) {
                     v0 = (*renderFromObject)(v0);
@@ -1524,19 +1452,23 @@ pstd::vector<Shape> Shape::Create(
 
             LOG_VERBOSE("Finished displacing mesh \"%s\" with \"%s\" -> %d tris",
                         filename, displacementTexName, plyMesh.triIndices.size() / 3);
+
+            displacedTrisDelta += plyMesh.triIndices.size() / 3 - origTriCount;
         }
 
         if (!plyMesh.triIndices.empty()) {
             TriangleMesh *mesh = alloc.new_object<TriangleMesh>(
                 *renderFromObject, reverseOrientation, plyMesh.triIndices, plyMesh.p,
-                std::vector<Vector3f>(), plyMesh.n, plyMesh.uv, plyMesh.faceIndices);
+                std::vector<Vector3f>(), plyMesh.n, plyMesh.uv, plyMesh.faceIndices,
+                alloc);
             shapes = Triangle::CreateTriangles(mesh, alloc);
         }
 
         if (!plyMesh.quadIndices.empty()) {
             BilinearPatchMesh *mesh = alloc.new_object<BilinearPatchMesh>(
                 *renderFromObject, reverseOrientation, plyMesh.quadIndices, plyMesh.p,
-                plyMesh.n, plyMesh.uv, plyMesh.faceIndices, nullptr /* image dist */);
+                plyMesh.n, plyMesh.uv, plyMesh.faceIndices, nullptr /* image dist */,
+                alloc);
             pstd::vector<Shape> quadMesh = BilinearPatch::CreatePatches(mesh, alloc);
             shapes.insert(shapes.end(), quadMesh.begin(), quadMesh.end());
         }

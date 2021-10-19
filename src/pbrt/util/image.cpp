@@ -32,6 +32,7 @@
 #include <ImfStringVectorAttribute.h>
 #endif
 
+#include <algorithm>
 #include <cmath>
 #include <numeric>
 
@@ -125,78 +126,10 @@ void ForExtent(const Bounds2i &extent, WrapMode2D wrapMode, const Image &image, 
 }
 
 // Image Method Definitions
-pstd::vector<Image> Image::GeneratePyramid(Image image, WrapMode2D wrapMode,
-                                           Allocator alloc) {
-    PixelFormat origFormat = image.format;
-    int nChannels = image.NChannels();
-    ColorEncoding origEncoding = image.encoding;
-    // Prepare _image_ for building pyramid
-    if (!IsPowerOf2(image.resolution[0]) || !IsPowerOf2(image.resolution[1]))
-        image = image.FloatResizeUp(
-            {RoundUpPow2(image.resolution[0]), RoundUpPow2(image.resolution[1])},
-            wrapMode);
-    else if (!Is32Bit(image.format))
-        image = image.ConvertToFormat(PixelFormat::Float);
-    CHECK(Is32Bit(image.format));
-
-    // Initialize levels of pyramid from _image_
-    int nLevels = 1 + Log2Int(std::max(image.resolution[0], image.resolution[1]));
-    pstd::vector<Image> pyramid(alloc);
-    pyramid.reserve(nLevels);
-    for (int i = 0; i < nLevels - 1; ++i) {
-        // Initialize $i+1$st level from $i$th level and copy $i$th into pyramid
-        pyramid.push_back(
-            Image(origFormat, image.resolution, image.channelNames, origEncoding, alloc));
-        // Initialize _nextImage_ for $i+1$st level
-        Point2i nextResolution(std::max(1, image.resolution[0] / 2),
-                               std::max(1, image.resolution[1] / 2));
-        Image nextImage(image.format, nextResolution, image.channelNames, origEncoding);
-
-        // Compute offsets from pixel to the 4 neighbors used for down filtering
-        int srcDeltas[4] = {0, nChannels, nChannels * image.resolution[0],
-                            nChannels * (image.resolution[0] + 1)};
-        if (image.resolution[0] == 1) {
-            srcDeltas[1] = 0;
-            srcDeltas[3] -= nChannels;
-        }
-        if (image.resolution[1] == 1) {
-            srcDeltas[2] = 0;
-            srcDeltas[3] -= nChannels * image.resolution[0];
-        }
-
-        // Downsample _image_ to create next level and update _pyramid_
-        ParallelFor(0, nextResolution[1], [&](int64_t y) {
-            // Loop over pixels in scanline $y$ and downfilter for the next pyramid level
-            int srcOffset = image.PixelOffset({0, 2 * int(y)});
-            int nextOffset = nextImage.PixelOffset({0, int(y)});
-            for (int x = 0; x < nextResolution[0]; ++x, srcOffset += nChannels)
-                for (int c = 0; c < nChannels; ++c, ++srcOffset, ++nextOffset)
-                    nextImage.p32[nextOffset] =
-                        (image.p32[srcOffset] + image.p32[srcOffset + srcDeltas[1]] +
-                         image.p32[srcOffset + srcDeltas[2]] +
-                         image.p32[srcOffset + srcDeltas[3]]) /
-                        4;
-
-            // Copy 2 scalines from _image_ out to its pyramid level
-            int yStart = 2 * y;
-            int yEnd = std::min(2 * int(y) + 2, image.resolution[1]);
-            int offset = image.PixelOffset({0, yStart});
-            size_t count = (yEnd - yStart) * nChannels * image.resolution[0];
-            pyramid[i].CopyRectIn(Bounds2i({0, yStart}, {image.resolution[0], yEnd}),
-                                  {image.p32.data() + offset, count});
-        });
-        image = std::move(nextImage);
-    }
-
-    // Initialize top level of pyramid and return it
-    CHECK(image.resolution[0] == 1 && image.resolution[1] == 1);
-    pyramid.push_back(Image(origFormat, {1, 1}, image.channelNames, origEncoding, alloc));
-    pyramid[nLevels - 1].CopyRectIn({{0, 0}, {1, 1}},
-                                    {image.p32.data(), size_t(nChannels)});
-    return pyramid;
-}
-
 bool Image::HasAnyInfinitePixels() const {
+    if (format == PixelFormat::U256)
+        return false;
+
     for (int y = 0; y < resolution.y; ++y)
         for (int x = 0; x < resolution.x; ++x)
             for (int c = 0; c < NChannels(); ++c)
@@ -206,6 +139,9 @@ bool Image::HasAnyInfinitePixels() const {
 }
 
 bool Image::HasAnyNaNPixels() const {
+    if (format == PixelFormat::U256)
+        return false;
+
     for (int y = 0; y < resolution.y; ++y)
         for (int x = 0; x < resolution.x; ++x)
             for (int c = 0; c < NChannels(); ++c)
@@ -366,6 +302,78 @@ Image Image::FloatResizeUp(Point2i newRes, WrapMode2D wrapMode) const {
     });
 
     return resampledImage;
+}
+
+pstd::vector<Image> Image::GeneratePyramid(Image image, WrapMode2D wrapMode,
+                                           Allocator alloc) {
+    PixelFormat origFormat = image.format;
+    int nChannels = image.NChannels();
+    ColorEncoding origEncoding = image.encoding;
+    // Prepare _image_ for building pyramid
+    if (!IsPowerOf2(image.resolution[0]) || !IsPowerOf2(image.resolution[1]))
+        image = image.FloatResizeUp(
+            Point2i(RoundUpPow2(image.resolution[0]), RoundUpPow2(image.resolution[1])),
+            wrapMode);
+    else if (!Is32Bit(image.format))
+        image = image.ConvertToFormat(PixelFormat::Float);
+    CHECK(Is32Bit(image.format));
+
+    // Initialize levels of pyramid from _image_
+    int nLevels = 1 + Log2Int(std::max(image.resolution[0], image.resolution[1]));
+    pstd::vector<Image> pyramid(alloc);
+    pyramid.reserve(nLevels);
+    for (int i = 0; i < nLevels - 1; ++i) {
+        // Initialize $i+1$st level from $i$th level and copy $i$th into pyramid
+        pyramid.push_back(
+            Image(origFormat, image.resolution, image.channelNames, origEncoding, alloc));
+        // Initialize _nextImage_ for $i+1$st level
+        Point2i nextResolution(std::max(1, image.resolution[0] / 2),
+                               std::max(1, image.resolution[1] / 2));
+        Image nextImage(image.format, nextResolution, image.channelNames, origEncoding);
+
+        // Compute offsets from pixels to the 4 pixels used for downsampling
+        int srcDeltas[4] = {0, nChannels, nChannels * image.resolution[0],
+                            nChannels * (image.resolution[0] + 1)};
+        if (image.resolution[0] == 1) {
+            srcDeltas[1] = 0;
+            srcDeltas[3] -= nChannels;
+        }
+        if (image.resolution[1] == 1) {
+            srcDeltas[2] = 0;
+            srcDeltas[3] -= nChannels * image.resolution[0];
+        }
+
+        // Downsample _image_ to create next level and update _pyramid_
+        ParallelFor(0, nextResolution[1], [&](int64_t y) {
+            // Loop over pixels in scanline $y$ and downsample for the next pyramid level
+            int srcOffset = image.PixelOffset(Point2i(0, 2 * int(y)));
+            int nextOffset = nextImage.PixelOffset(Point2i(0, int(y)));
+            for (int x = 0; x < nextResolution[0]; ++x, srcOffset += nChannels)
+                for (int c = 0; c < nChannels; ++c, ++srcOffset, ++nextOffset)
+                    nextImage.p32[nextOffset] =
+                        (image.p32[srcOffset] + image.p32[srcOffset + srcDeltas[1]] +
+                         image.p32[srcOffset + srcDeltas[2]] +
+                         image.p32[srcOffset + srcDeltas[3]]) /
+                        4;
+
+            // Copy two scanlines from _image_ out to its pyramid level
+            int yStart = 2 * y;
+            int yEnd = std::min(2 * int(y) + 2, image.resolution[1]);
+            int offset = image.PixelOffset({0, yStart});
+            size_t count = (yEnd - yStart) * nChannels * image.resolution[0];
+            pyramid[i].CopyRectIn(
+                Bounds2i({0, yStart}, {image.resolution[0], yEnd}),
+                pstd::span<const float>(image.p32.data() + offset, count));
+        });
+        image = std::move(nextImage);
+    }
+
+    // Initialize top level of pyramid and return it
+    CHECK(image.resolution[0] == 1 && image.resolution[1] == 1);
+    pyramid.push_back(Image(origFormat, {1, 1}, image.channelNames, origEncoding, alloc));
+    pyramid[nLevels - 1].CopyRectIn(Bounds2i({0, 0}, {1, 1}),
+                                    pstd::span<const float>(image.p32.data(), nChannels));
+    return pyramid;
 }
 
 Image::Image(PixelFormat format, Point2i resolution,
@@ -543,7 +551,7 @@ ImageChannelValues Image::MAE(const ImageChannelDesc &desc, const Image &ref,
             ImageChannelValues vref = ref.GetChannels({x, y}, refDesc);
 
             for (int c = 0; c < desc.size(); ++c) {
-                Float error = v[c] - vref[c];
+                double error = double(v[c]) - double(vref[c]);
                 if (IsInf(error))
                     continue;
                 sumError[c] += error;
@@ -577,7 +585,7 @@ ImageChannelValues Image::MSE(const ImageChannelDesc &desc, const Image &ref,
             ImageChannelValues vref = ref.GetChannels({x, y}, refDesc);
 
             for (int c = 0; c < desc.size(); ++c) {
-                Float se = Sqr(v[c] - vref[c]);
+                double se = Sqr(double(v[c]) - double(vref[c]));
                 if (IsInf(se))
                     continue;
                 sumSE[c] += se;
@@ -609,7 +617,7 @@ ImageChannelValues Image::MRSE(const ImageChannelDesc &desc, const Image &ref,
             ImageChannelValues vref = ref.GetChannels({x, y}, refDesc);
 
             for (int c = 0; c < desc.size(); ++c) {
-                Float rse = Sqr(v[c] - vref[c]) / Sqr(vref[c] + 0.01);
+                double rse = Sqr(double(v[c]) - double(vref[c])) / Sqr(vref[c] + 0.01);
                 if (IsInf(rse))
                     continue;
                 sumRSE[c] += rse;
@@ -1228,7 +1236,7 @@ static ImageAndMetadata ReadPNG(const std::string &name, Allocator alloc,
                     v = encoding.ToFloatLinear(v);
                     image.SetChannel(Point2i(x, y), 0, v);
                 }
-            CHECK(bufIter == buf.end());
+            DCHECK(bufIter == buf.end());
         } else {
             image = Image(PixelFormat::U256, Point2i(width, height), {"Y"}, encoding);
             std::copy(buf.begin(), buf.end(), (uint8_t *)image.RawPointer({0, 0}));
@@ -1255,7 +1263,7 @@ static ImageAndMetadata ReadPNG(const std::string &name, Allocator alloc,
                 auto bufIter = buf.begin();
                 for (unsigned int y = 0; y < height; ++y)
                     for (unsigned int x = 0; x < width; ++x, bufIter += 8) {
-                        CHECK(bufIter < buf.end());
+                        DCHECK(bufIter < buf.end());
                         // Convert from little endian.
                         Float rgba[4] = {
                             (((int)bufIter[0] << 8) + (int)bufIter[1]) / 65535.f,
@@ -1267,13 +1275,13 @@ static ImageAndMetadata ReadPNG(const std::string &name, Allocator alloc,
                             image.SetChannel(Point2i(x, y), c, rgba[c]);
                         }
                     }
-                CHECK(bufIter == buf.end());
+                DCHECK(bufIter == buf.end());
             } else {
                 image = Image(PixelFormat::Half, Point2i(width, height), {"R", "G", "B"});
                 auto bufIter = buf.begin();
                 for (unsigned int y = 0; y < height; ++y)
                     for (unsigned int x = 0; x < width; ++x, bufIter += 6) {
-                        CHECK(bufIter < buf.end());
+                        DCHECK(bufIter < buf.end());
                         // Convert from little endian.
                         Float rgb[3] = {
                             (((int)bufIter[0] << 8) + (int)bufIter[1]) / 65535.f,
@@ -1284,7 +1292,7 @@ static ImageAndMetadata ReadPNG(const std::string &name, Allocator alloc,
                             image.SetChannel(Point2i(x, y), c, rgb[c]);
                         }
                     }
-                CHECK(bufIter == buf.end());
+                DCHECK(bufIter == buf.end());
             }
         } else if (hasAlpha) {
             image = Image(PixelFormat::U256, Point2i(width, height), {"R", "G", "B", "A"},
@@ -1307,9 +1315,38 @@ Image Image::SelectChannels(const ImageChannelDesc &desc, Allocator alloc) const
         descChannelNames.push_back(channelNames[desc.offset[i]]);
 
     Image image(format, resolution, descChannelNames, encoding, alloc);
-    for (int y = 0; y < resolution.y; ++y)
-        for (int x = 0; x < resolution.x; ++x)
-            image.SetChannels({x, y}, GetChannels({x, y}, desc));
+    switch (format) {
+    case PixelFormat::U256:
+        for (int y = 0; y < resolution.y; ++y)
+            for (int x = 0; x < resolution.x; ++x) {
+                const uint8_t *src = (const uint8_t *)RawPointer({x, y});
+                uint8_t *dst = (uint8_t *)image.RawPointer({x, y});
+                for (size_t i = 0; i < desc.offset.size(); ++i)
+                    dst[i] = src[desc.offset[i]];
+            }
+        break;
+    case PixelFormat::Half:
+        for (int y = 0; y < resolution.y; ++y)
+            for (int x = 0; x < resolution.x; ++x) {
+                const Half *src = (const Half *)RawPointer({x, y});
+                Half *dst = (Half *)image.RawPointer({x, y});
+                for (size_t i = 0; i < desc.offset.size(); ++i)
+                    dst[i] = src[desc.offset[i]];
+            }
+        break;
+    case PixelFormat::Float:
+        for (int y = 0; y < resolution.y; ++y)
+            for (int x = 0; x < resolution.x; ++x) {
+                const float *src = (const float *)RawPointer({x, y});
+                float *dst = (float *)image.RawPointer({x, y});
+                for (size_t i = 0; i < desc.offset.size(); ++i)
+                    dst[i] = src[desc.offset[i]];
+            }
+        break;
+    default:
+        LOG_FATAL("Unhandled PixelFormat");
+    }
+
     return image;
 }
 
@@ -1388,14 +1425,18 @@ bool Image::WritePNG(const std::string &filename, const ImageMetadata &metadata)
 
     if (error == 0) {
         std::string encodedPNG(png, png + pngSize);
-        if (!WriteFileContents(filename, encodedPNG))
+        if (!WriteFileContents(filename, encodedPNG)) {
             Error("%s: error writing PNG.", filename);
-    } else
+            return false;
+        }
+    } else {
         Error("%s: %s", filename, lodepng_error_text(error));
+        return false;
+    }
 
     free(png);
 
-    return error == 0;
+    return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////

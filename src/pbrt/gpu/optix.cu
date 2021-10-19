@@ -110,7 +110,7 @@ extern "C" __global__ void __raygen__findClosest() {
         ray.d.y, ray.d.z, tMax);
 
     uint32_t missed = 0;
-    Trace(params.traversable, ray, 0.f /* tMin */, tMax, OPTIX_RAY_FLAG_NONE, p0, p1,
+    Trace(params.traversable, ray, 1e-5f /* tMin */, tMax, OPTIX_RAY_FLAG_NONE, p0, p1,
           missed);
 
     if (missed)
@@ -258,7 +258,7 @@ extern "C" __global__ void __raygen__shadow() {
     Trace(params.traversable, sr.ray, 1e-5f /* tMin */, sr.tMax, OPTIX_RAY_FLAG_NONE,
           missed);
 
-    RecordShadowRayIntersection(sr, &params.pixelSampleState, !missed);
+    RecordShadowRayResult(sr, &params.pixelSampleState, !missed);
 }
 
 extern "C" __global__ void __miss__shadow() {
@@ -266,7 +266,7 @@ extern "C" __global__ void __miss__shadow() {
 }
 
 extern "C" __global__ void __raygen__shadow_Tr() {
-    PBRT_DBG("raygen sahadow tr %d\n", optixGetLaunchIndex().x);
+    PBRT_DBG("raygen shadow tr %d\n", optixGetLaunchIndex().x);
     int index = optixGetLaunchIndex().x;
     if (index >= params.shadowRayQueue->Size())
         return;
@@ -488,8 +488,8 @@ extern "C" __global__ void __raygen__randomHit() {
 
     uint32_t ptr0 = packPointer0(&payload), ptr1 = packPointer1(&payload);
 
-    PBRT_DBG("Randomhit raygen ray.o %f %f %f ray.d %f %f %f tMax %f\n", ray.o.x, ray.o.y,
-        ray.o.z, ray.d.x, ray.d.y, ray.d.z, tMax);
+    PBRT_DBG("Randomhit raygen ray.o %f %f %f ray.d %f %f %f\n", ray.o.x, ray.o.y,
+        ray.o.z, ray.d.x, ray.d.y, ray.d.z);
 
     while (true) {
         Trace(params.traversable, ray, 0.f /* tMin */, 1.f /* tMax */,
@@ -508,7 +508,7 @@ extern "C" __global__ void __raygen__randomHit() {
         PBRT_DBG("optix si p %f %f %f n %f %f %f\n", si.p().x, si.p().y, si.p().z, si.n.x,
             si.n.y, si.n.z);
 
-        params.subsurfaceScatterQueue->reservoirPDF[index] = payload.wrs.SamplePDF();
+        params.subsurfaceScatterQueue->reservoirPDF[index] = payload.wrs.SampleProbability();
         params.subsurfaceScatterQueue->ssi[index] = payload.wrs.GetSample();
     } else
         params.subsurfaceScatterQueue->reservoirPDF[index] = 0;

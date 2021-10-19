@@ -16,6 +16,7 @@
 #include <pbrt/util/image.h>
 #include <pbrt/util/scattering.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -55,12 +56,12 @@ class CameraTransform {
     bool CameraFromRenderHasScale() const { return renderFromCamera.HasScale(); }
 
     PBRT_CPU_GPU
-    Vector3f RenderFromCamera(const Vector3f &v, Float time) const {
+    Vector3f RenderFromCamera(Vector3f v, Float time) const {
         return renderFromCamera(v, time);
     }
 
     PBRT_CPU_GPU
-    Normal3f RenderFromCamera(const Normal3f &n, Float time) const {
+    Normal3f RenderFromCamera(Normal3f n, Float time) const {
         return renderFromCamera(n, time);
     }
 
@@ -73,12 +74,12 @@ class CameraTransform {
     }
 
     PBRT_CPU_GPU
-    Vector3f CameraFromRender(const Vector3f &v, Float time) const {
+    Vector3f CameraFromRender(Vector3f v, Float time) const {
         return renderFromCamera.ApplyInverse(v, time);
     }
 
     PBRT_CPU_GPU
-    Normal3f CameraFromRender(const Normal3f &v, Float time) const {
+    Normal3f CameraFromRender(Normal3f v, Float time) const {
         return renderFromCamera.ApplyInverse(v, time);
     }
 
@@ -155,12 +156,11 @@ class CameraBase {
                             Vector3f *dpdx, Vector3f *dpdy) const {
         // Compute tangent plane equation for ray differential intersections
         Point3f pCamera = CameraFromRender(p, time);
-        Normal3f nCamera = CameraFromRender(n, time);
         Transform DownZFromCamera =
             RotateFromTo(Normalize(Vector3f(pCamera)), Vector3f(0, 0, 1));
         Point3f pDownZ = DownZFromCamera(pCamera);
-        Normal3f nDownZ = DownZFromCamera(nCamera);
-        Float d = Dot(nDownZ, Vector3f(pDownZ));
+        Normal3f nDownZ = DownZFromCamera(CameraFromRender(n, time));
+        Float d = nDownZ.z * pDownZ.z;
 
         // Find intersection points for approximated camera differential rays
         Ray xRay(Point3f(0, 0, 0) + minPosDifferentialX,
@@ -210,12 +210,12 @@ class CameraBase {
     }
 
     PBRT_CPU_GPU
-    Vector3f RenderFromCamera(const Vector3f &v, Float time) const {
+    Vector3f RenderFromCamera(Vector3f v, Float time) const {
         return cameraTransform.RenderFromCamera(v, time);
     }
 
     PBRT_CPU_GPU
-    Normal3f RenderFromCamera(const Normal3f &v, Float time) const {
+    Normal3f RenderFromCamera(Normal3f v, Float time) const {
         return cameraTransform.RenderFromCamera(v, time);
     }
 
@@ -225,12 +225,12 @@ class CameraBase {
     }
 
     PBRT_CPU_GPU
-    Vector3f CameraFromRender(const Vector3f &v, Float time) const {
+    Vector3f CameraFromRender(Vector3f v, Float time) const {
         return cameraTransform.CameraFromRender(v, time);
     }
 
     PBRT_CPU_GPU
-    Normal3f CameraFromRender(const Normal3f &v, Float time) const {
+    Normal3f CameraFromRender(Normal3f v, Float time) const {
         return cameraTransform.CameraFromRender(v, time);
     }
 

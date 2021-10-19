@@ -5,9 +5,12 @@
 #include <pbrt/pbrt.h>
 
 #include <pbrt/cpu/render.h>
+#ifdef PBRT_BUILD_GPU_RENDERER
+#include <pbrt/gpu/memory.h>
+#endif  // PBRT_BUILD_GPU_RENDERER
 #include <pbrt/options.h>
-#include <pbrt/parsedscene.h>
 #include <pbrt/parser.h>
+#include <pbrt/scene.h>
 #include <pbrt/util/args.h>
 #include <pbrt/util/check.h>
 #include <pbrt/util/error.h>
@@ -32,11 +35,12 @@ static void usage(const std::string &msg = {}) {
             R"(usage: pbrt [<options>] <filename.pbrt...>
 
 Rendering options:
-  --cropwindow <x0,x1,y0,y1>    Specify an image crop window w.r.t. [0,1]^2
+  --cropwindow <x0,x1,y0,y1>    Specify an image crop window w.r.t. [0,1]^2.
   --debugstart <values>         Inform the Integrator where to start rendering for
                                 faster debugging. (<values> are Integrator-specific
                                 and come from error message text.)
   --disable-pixel-jitter        Always sample pixels at their centers.
+  --disable-texture-filtering   Point-sample all textures.
   --disable-wavelength-jitter   Always sample the same %d wavelengths of light.
   --displacement-edge-scale <s> Scale target triangle edge length by given value.
                                 (Default: 1)
@@ -79,6 +83,8 @@ Logging options:
                                 --log-level verbose if specified.
   --log-level <level>           Log messages at or above this level, where <level>
                                 is "verbose", "error", or "fatal". Default: "error".
+  --log-utilization             Periodically print processor and memory use in verbose-
+                                level logging.
 
 Reformatting options:
   --format                      Print a reformatted version of the input file(s) to
@@ -155,6 +161,8 @@ int main(int argc, char *argv[]) {
             ParseArg(&iter, args.end(), "debugstart", &options.debugStart, onError) ||
             ParseArg(&iter, args.end(), "disable-pixel-jitter",
                      &options.disablePixelJitter, onError) ||
+            ParseArg(&iter, args.end(), "disable-texture-filtering",
+                     &options.disableTextureFiltering, onError) ||
             ParseArg(&iter, args.end(), "disable-wavelength-jitter",
                      &options.disableWavelengthJitter, onError) ||
             ParseArg(&iter, args.end(), "displacement-edge-scale",
@@ -165,6 +173,8 @@ int main(int argc, char *argv[]) {
                      onError) ||
             ParseArg(&iter, args.end(), "format", &format, onError) ||
             ParseArg(&iter, args.end(), "log-level", &logLevel, onError) ||
+            ParseArg(&iter, args.end(), "log-utilization", &options.logUtilization,
+                     onError) ||
             ParseArg(&iter, args.end(), "log-file", &options.logFile, onError) ||
             ParseArg(&iter, args.end(), "mse-reference-image", &options.mseReferenceImage,
                      onError) ||
@@ -244,15 +254,16 @@ int main(int argc, char *argv[]) {
     InitPBRT(options);
 
     if (format || toPly || options.upgrade) {
-        FormattingScene formattingScene(toPly, options.upgrade);
-        ParseFiles(&formattingScene, filenames);
+        FormattingParserTarget formattingTarget(toPly, options.upgrade);
+        ParseFiles(&formattingTarget, filenames);
     } else {
         // Parse provided scene description files
-        ParsedScene scene;
-        ParseFiles(&scene, filenames);
+        BasicScene scene;
+        BasicSceneBuilder builder(&scene);
+        ParseFiles(&builder, filenames);
 
         // Render the scene
-        if (options.useGPU || options.wavefront)
+        if (Options->useGPU || Options->wavefront)
             RenderWavefront(scene);
         else
             RenderCPU(scene);

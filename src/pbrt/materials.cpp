@@ -30,12 +30,13 @@ std::string MaterialEvalContext::ToString() const {
                         TextureEvalContext::ToString(), wo, ns, dpdus);
 }
 
-std::string BumpEvalContext::ToString() const {
-    return StringPrintf("[ BumpEvalContext p: %s uv: %s shading.n: %s shading.dpdu: %s "
-                        "shading.dpdv: %s shading.dndu: %s shading.dndv: %s dudx: %f "
-                        "dudy: %f dvdx: %f dvdy: %f dpdx: %s dpdy: %s faceIndex: %d ]",
-                        p, uv, shading.n, shading.dpdu, shading.dpdv, shading.dndu,
-                        shading.dndv, dudx, dudy, dvdx, dvdy, dpdx, dpdy, faceIndex);
+std::string NormalBumpEvalContext::ToString() const {
+    return StringPrintf(
+        "[ NormalBumpEvalContext p: %s uv: %s shading.n: %s shading.dpdu: %s "
+        "shading.dpdv: %s shading.dndu: %s shading.dndv: %s dudx: %f "
+        "dudy: %f dvdx: %f dvdy: %f dpdx: %s dpdy: %s faceIndex: %d ]",
+        p, uv, shading.n, shading.dpdu, shading.dpdv, shading.dndu, shading.dndv, dudx,
+        dudy, dvdx, dvdy, dpdx, dpdy, faceIndex);
 }
 
 // DielectricMaterial Method Definitions
@@ -179,8 +180,8 @@ HairMaterial *HairMaterial::Create(const TextureParameterDictionary &parameters,
 
 // DiffuseMaterial Method Definitions
 std::string DiffuseMaterial::ToString() const {
-    return StringPrintf("[ DiffuseMaterial displacement: %s reflectance: %s sigma: %s ]",
-                        displacement, reflectance, sigma);
+    return StringPrintf("[ DiffuseMaterial displacement: %s reflectance: %s ]",
+                        displacement, reflectance);
 }
 
 DiffuseMaterial *DiffuseMaterial::Create(const TextureParameterDictionary &parameters,
@@ -191,10 +192,9 @@ DiffuseMaterial *DiffuseMaterial::Create(const TextureParameterDictionary &param
     if (!reflectance)
         reflectance = alloc.new_object<SpectrumConstantTexture>(
             alloc.new_object<ConstantSpectrum>(0.5f));
-    FloatTexture sigma = parameters.GetFloatTexture("sigma", 0.f, alloc);
     FloatTexture displacement = parameters.GetFloatTextureOrNull("displacement", alloc);
 
-    return alloc.new_object<DiffuseMaterial>(reflectance, sigma, displacement, normalMap);
+    return alloc.new_object<DiffuseMaterial>(reflectance, displacement, normalMap);
 }
 
 // ConductorMaterial Method Definitions
@@ -244,10 +244,9 @@ ConductorMaterial *ConductorMaterial::Create(const TextureParameterDictionary &p
 
 // CoatedDiffuseMaterial Method Definitions
 template <typename TextureEvaluator>
-BSDF CoatedDiffuseMaterial::GetBSDF(TextureEvaluator texEval,
-                                    const MaterialEvalContext &ctx,
-                                    SampledWavelengths &lambda,
-                                    CoatedDiffuseBxDF *bxdf) const {
+CoatedDiffuseBxDF CoatedDiffuseMaterial::GetBxDF(TextureEvaluator texEval,
+                                                 const MaterialEvalContext &ctx,
+                                                 SampledWavelengths &lambda) const {
     // Initialize diffuse component of plastic material
     SampledSpectrum r = Clamp(texEval(reflectance, ctx, lambda), 0, 1);
 
@@ -271,20 +270,17 @@ BSDF CoatedDiffuseMaterial::GetBSDF(TextureEvaluator texEval,
     SampledSpectrum a = Clamp(texEval(albedo, ctx, lambda), 0, 1);
     Float gg = Clamp(texEval(g, ctx), -1, 1);
 
-    *bxdf = CoatedDiffuseBxDF(DielectricBxDF(sampledEta, distrib), DiffuseBxDF(r), thick,
-                              a, gg, maxDepth, nSamples);
-    return BSDF(ctx.ns, ctx.dpdus, bxdf);
+    return CoatedDiffuseBxDF(DielectricBxDF(sampledEta, distrib), DiffuseBxDF(r), thick,
+                             a, gg, maxDepth, nSamples);
 }
 
 // Explicit template instantiation
-template BSDF CoatedDiffuseMaterial::GetBSDF(BasicTextureEvaluator,
-                                             const MaterialEvalContext &ctx,
-                                             SampledWavelengths &lambda,
-                                             CoatedDiffuseBxDF *bxdf) const;
-template BSDF CoatedDiffuseMaterial::GetBSDF(UniversalTextureEvaluator,
-                                             const MaterialEvalContext &ctx,
-                                             SampledWavelengths &lambda,
-                                             CoatedDiffuseBxDF *bxdf) const;
+template CoatedDiffuseBxDF CoatedDiffuseMaterial::GetBxDF(
+    BasicTextureEvaluator, const MaterialEvalContext &ctx,
+    SampledWavelengths &lambda) const;
+template CoatedDiffuseBxDF CoatedDiffuseMaterial::GetBxDF(
+    UniversalTextureEvaluator, const MaterialEvalContext &ctx,
+    SampledWavelengths &lambda) const;
 
 std::string CoatedDiffuseMaterial::ToString() const {
     return StringPrintf(
@@ -339,10 +335,9 @@ CoatedDiffuseMaterial *CoatedDiffuseMaterial::Create(
 }
 
 template <typename TextureEvaluator>
-BSDF CoatedConductorMaterial::GetBSDF(TextureEvaluator texEval,
-                                      const MaterialEvalContext &ctx,
-                                      SampledWavelengths &lambda,
-                                      CoatedConductorBxDF *bxdf) const {
+CoatedConductorBxDF CoatedConductorMaterial::GetBxDF(TextureEvaluator texEval,
+                                                     const MaterialEvalContext &ctx,
+                                                     SampledWavelengths &lambda) const {
     Float iurough = texEval(interfaceURoughness, ctx);
     Float ivrough = texEval(interfaceVRoughness, ctx);
     if (remapRoughness) {
@@ -380,20 +375,17 @@ BSDF CoatedConductorMaterial::GetBSDF(TextureEvaluator texEval,
     SampledSpectrum a = Clamp(texEval(albedo, ctx, lambda), 0, 1);
     Float gg = Clamp(texEval(g, ctx), -1, 1);
 
-    *bxdf = CoatedConductorBxDF(DielectricBxDF(ieta, interfaceDistrib),
-                                ConductorBxDF(conductorDistrib, ce, ck), thick, a, gg,
-                                maxDepth, nSamples);
-    return BSDF(ctx.ns, ctx.dpdus, bxdf);
+    return CoatedConductorBxDF(DielectricBxDF(ieta, interfaceDistrib),
+                               ConductorBxDF(conductorDistrib, ce, ck), thick, a, gg,
+                               maxDepth, nSamples);
 }
 
-template BSDF CoatedConductorMaterial::GetBSDF(BasicTextureEvaluator,
-                                               const MaterialEvalContext &ctx,
-                                               SampledWavelengths &lambda,
-                                               CoatedConductorBxDF *bxdf) const;
-template BSDF CoatedConductorMaterial::GetBSDF(UniversalTextureEvaluator,
-                                               const MaterialEvalContext &ctx,
-                                               SampledWavelengths &lambda,
-                                               CoatedConductorBxDF *bxdf) const;
+template CoatedConductorBxDF CoatedConductorMaterial::GetBxDF(
+    BasicTextureEvaluator, const MaterialEvalContext &ctx,
+    SampledWavelengths &lambda) const;
+template CoatedConductorBxDF CoatedConductorMaterial::GetBxDF(
+    UniversalTextureEvaluator, const MaterialEvalContext &ctx,
+    SampledWavelengths &lambda) const;
 
 std::string CoatedConductorMaterial::ToString() const {
     return StringPrintf("[ CoatedConductorMaterial displacement: %f interfaceURoughness: "
@@ -566,8 +558,8 @@ SubsurfaceMaterial *SubsurfaceMaterial::Create(
 // DiffuseTransmissionMaterial Method Definitions
 std::string DiffuseTransmissionMaterial::ToString() const {
     return StringPrintf("[ DiffuseTransmissionMaterial displacement: %s reflectance: %s "
-                        "transmittance: %s sigma: %s ]",
-                        displacement, reflectance, transmittance, sigma);
+                        "transmittance: %s ]",
+                        displacement, reflectance, transmittance);
 }
 
 DiffuseTransmissionMaterial *DiffuseTransmissionMaterial::Create(
@@ -587,11 +579,10 @@ DiffuseTransmissionMaterial *DiffuseTransmissionMaterial::Create(
 
     FloatTexture displacement = parameters.GetFloatTextureOrNull("displacement", alloc);
     bool remapRoughness = parameters.GetOneBool("remaproughness", true);
-    FloatTexture sigma = parameters.GetFloatTexture("sigma", 0.f, alloc);
     Float scale = parameters.GetOneFloat("scale", 1.f);
 
-    return alloc.new_object<DiffuseTransmissionMaterial>(
-        reflectance, transmittance, sigma, displacement, normalMap, scale);
+    return alloc.new_object<DiffuseTransmissionMaterial>(reflectance, transmittance,
+                                                         displacement, normalMap, scale);
 }
 
 MeasuredMaterial::MeasuredMaterial(const std::string &filename, FloatTexture displacement,

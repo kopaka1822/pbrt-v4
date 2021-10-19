@@ -21,16 +21,49 @@
 #include <pbrt/util/spectrum.h>
 #include <pbrt/util/stats.h>
 
+#include <ImfThreading.h>
+
 #include <stdlib.h>
 
+#ifdef PBRT_IS_WINDOWS
+#include <Windows.h>
+#endif  // PBRT_IS_WINDOWS
+
 namespace pbrt {
+
+#ifdef PBRT_IS_WINDOWS
+static LONG WINAPI handleExceptions(PEXCEPTION_POINTERS info) {
+    switch (info->ExceptionRecord->ExceptionCode) {
+    case EXCEPTION_ACCESS_VIOLATION:
+        LOG_ERROR("Access violation--terminating execution");
+        break;
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+        LOG_ERROR("Array bounds violation--terminating execution");
+        break;
+    case EXCEPTION_DATATYPE_MISALIGNMENT:
+        LOG_ERROR("Accessed misaligned data--terminating execution");
+        break;
+    case EXCEPTION_STACK_OVERFLOW:
+        LOG_ERROR("Stack overflow--terminating execution");
+        break;
+    default:
+        LOG_ERROR("Program generated exception %d--terminating execution",
+                  int(info->ExceptionRecord->ExceptionCode));
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif  // PBRT_IS_WINDOWS
 
 // API Function Definitions
 void InitPBRT(const PBRTOptions &opt) {
     Options = new PBRTOptions(opt);
     // API Initialization
 
-#if defined(PBRT_IS_WINDOWS) && defined(PBRT_BUILD_GPU_RENDERER)
+    Imf::setGlobalThreadCount(opt.nThreads ? opt.nThreads : AvailableCores());
+
+#if defined(PBRT_IS_WINDOWS)
+    SetUnhandledExceptionFilter(handleExceptions);
+#if defined(PBRT_BUILD_GPU_RENDERER)
     if (Options->useGPU && Options->gpuDevice && !getenv("CUDA_VISIBLE_DEVICES")) {
         // Limit CUDA to considering only a single GPU on Windows.  pbrt
         // only uses a single GPU anyway, and if there are multiple GPUs
@@ -43,12 +76,13 @@ void InitPBRT(const PBRTOptions &opt) {
         // is the one to use.
         *Options->gpuDevice = 0;
     }
-#endif  // PBRT_IS_WINDOWS && PBRT_BUILD_GPU_RENDERER
+#endif  // PBRT_BUILD_GPU_RENDERER
+#endif  // PBRT_IS_WINDOWS
 
     if (Options->quiet)
         SuppressErrorMessages();
 
-    InitLogging(opt.logLevel, opt.logFile, Options->useGPU);
+    InitLogging(opt.logLevel, opt.logFile, opt.logUtilization, Options->useGPU);
 
     // General \pbrt Initialization
     int nThreads = Options->nThreads != 0 ? Options->nThreads : AvailableCores();
@@ -59,16 +93,20 @@ void InitPBRT(const PBRTOptions &opt) {
 #ifdef PBRT_BUILD_GPU_RENDERER
         GPUInit();
 
-        CUDA_CHECK(cudaMemcpyToSymbol(OptionsGPU, Options, sizeof(OptionsGPU)));
+        CopyOptionsToGPU();
 
-        ColorEncoding::Init(gpuMemoryAllocator);
-        Spectra::Init(gpuMemoryAllocator);
-        RGBToSpectrumTable::Init(gpuMemoryAllocator);
+        // Leak this so memory it allocates isn't freed
+        pstd::pmr::monotonic_buffer_resource *bufferResource =
+            new pstd::pmr::monotonic_buffer_resource(
+                1024 * 1024, &CUDATrackedMemoryResource::singleton);
+        Allocator alloc(bufferResource);
+        ColorEncoding::Init(alloc);
+        Spectra::Init(alloc);
+        RGBToSpectrumTable::Init(alloc);
 
-        RGBColorSpace::Init(gpuMemoryAllocator);
-        InitBufferCaches(gpuMemoryAllocator);
-        Triangle::Init(gpuMemoryAllocator);
-        BilinearPatch::Init(gpuMemoryAllocator);
+        RGBColorSpace::Init(alloc);
+        Triangle::Init(alloc);
+        BilinearPatch::Init(alloc);
 #else
         LOG_FATAL("Options::useGPU set with non-GPU build");
 #endif
@@ -79,10 +117,11 @@ void InitPBRT(const PBRTOptions &opt) {
         RGBToSpectrumTable::Init(Allocator{});
 
         RGBColorSpace::Init(Allocator{});
-        InitBufferCaches({});
         Triangle::Init({});
         BilinearPatch::Init({});
     }
+
+    InitBufferCaches();
 
     if (!Options->displayServer.empty())
         ConnectToDisplayServer(Options->displayServer);
@@ -107,7 +146,8 @@ void CleanupPBRT() {
     // API Cleanup
     ParallelCleanup();
 
-    // CO    delete Options;
+    ShutdownLogging();
+
     Options = nullptr;
 }
 

@@ -14,11 +14,13 @@
 #include <pbrt/util/check.h>
 #include <pbrt/util/color.h>
 #include <pbrt/util/float.h>
+#include <pbrt/util/hash.h>
 #include <pbrt/util/math.h>
 #include <pbrt/util/pstd.h>
 #include <pbrt/util/sampling.h>
 #include <pbrt/util/taggedptr.h>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <numeric>
@@ -326,7 +328,7 @@ class SampledWavelengths {
     }
 
     PBRT_CPU_GPU
-    static SampledWavelengths SampleXYZ(Float u) {
+    static SampledWavelengths SampleVisible(Float u) {
         SampledWavelengths swl;
         for (int i = 0; i < NSpectrumSamples; ++i) {
             // Compute _up_ for $i$th wavelength sample
@@ -334,8 +336,8 @@ class SampledWavelengths {
             if (up > 1)
                 up -= 1;
 
-            swl.lambda[i] = SampleXYZMatching(up);
-            swl.pdf[i] = XYZMatchingPDF(swl.lambda[i]);
+            swl.lambda[i] = SampleVisibleWavelengths(up);
+            swl.pdf[i] = VisibleWavelengthsPDF(swl.lambda[i]);
         }
         return swl;
     }
@@ -376,6 +378,10 @@ class DenselySampledSpectrum {
           values(lambda_max - lambda_min + 1, alloc) {}
     DenselySampledSpectrum(Spectrum s, Allocator alloc)
         : DenselySampledSpectrum(s, Lambda_min, Lambda_max, alloc) {}
+    DenselySampledSpectrum(const DenselySampledSpectrum &s, Allocator alloc)
+        : lambda_min(s.lambda_min),
+          lambda_max(s.lambda_max),
+          values(s.values.begin(), s.values.end(), alloc) {}
 
     PBRT_CPU_GPU
     SampledSpectrum Sample(const SampledWavelengths &lambda) const {
@@ -431,7 +437,25 @@ class DenselySampledSpectrum {
         return values[offset];
     }
 
+    PBRT_CPU_GPU
+    bool operator==(const DenselySampledSpectrum &d) const {
+        if (lambda_min != d.lambda_min || lambda_max != d.lambda_max ||
+            values.size() != d.values.size())
+            return false;
+        for (size_t i = 0; i < values.size(); ++i)
+            if (values[i] != d.values[i])
+                return false;
+        return true;
+    }
+
+    struct Hash {
+        size_t operator()(const DenselySampledSpectrum &s) const {
+            return HashBuffer(s.values.data(), s.values.size());
+        }
+    };
+
   private:
+    friend struct Hash;
     // DenselySampledSpectrum Private Members
     int lambda_min, lambda_max;
     pstd::vector<Float> values;
@@ -519,7 +543,7 @@ class RGBAlbedoSpectrum {
     Float MaxValue() const { return rsp.MaxValue(); }
 
     PBRT_CPU_GPU
-    RGBAlbedoSpectrum(const RGBColorSpace &cs, const RGB &rgb);
+    RGBAlbedoSpectrum(const RGBColorSpace &cs, RGB rgb);
 
     PBRT_CPU_GPU
     SampledSpectrum Sample(const SampledWavelengths &lambda) const {
@@ -545,7 +569,7 @@ class RGBUnboundedSpectrum {
     Float MaxValue() const { return scale * rsp.MaxValue(); }
 
     PBRT_CPU_GPU
-    RGBUnboundedSpectrum(const RGBColorSpace &cs, const RGB &rgb);
+    RGBUnboundedSpectrum(const RGBColorSpace &cs, RGB rgb);
 
     PBRT_CPU_GPU
     RGBUnboundedSpectrum() : rsp(0, 0, 0), scale(0) {}
@@ -571,20 +595,29 @@ class RGBIlluminantSpectrum {
     // RGBIlluminantSpectrum Public Methods
     RGBIlluminantSpectrum() = default;
     PBRT_CPU_GPU
-    RGBIlluminantSpectrum(const RGBColorSpace &cs, const RGB &rgb);
+    RGBIlluminantSpectrum(const RGBColorSpace &cs, RGB rgb);
 
     PBRT_CPU_GPU
     Float operator()(Float lambda) const {
+        if (!illuminant)
+            return 0;
         return scale * rsp(lambda) * (*illuminant)(lambda);
     }
-    PBRT_CPU_GPU
-    Float MaxValue() const { return scale * rsp.MaxValue() * illuminant->MaxValue(); }
 
     PBRT_CPU_GPU
-    const DenselySampledSpectrum *Illluminant() const { return illuminant; }
+    Float MaxValue() const {
+        if (!illuminant)
+            return 0;
+        return scale * rsp.MaxValue() * illuminant->MaxValue();
+    }
+
+    PBRT_CPU_GPU
+    const DenselySampledSpectrum *Illuminant() const { return illuminant; }
 
     PBRT_CPU_GPU
     SampledSpectrum Sample(const SampledWavelengths &lambda) const {
+        if (!illuminant)
+            return SampledSpectrum(0);
         SampledSpectrum s;
         for (int i = 0; i < NSpectrumSamples; ++i)
             s[i] = scale * rsp(lambda[i]);

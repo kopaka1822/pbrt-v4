@@ -96,7 +96,7 @@ struct BSSRDFProbeSegment {
     // BSSRDFProbeSegment Public Methods
     BSSRDFProbeSegment() = default;
     PBRT_CPU_GPU
-    BSSRDFProbeSegment(const Point3f &p0, const Point3f &p1) : p0(p0), p1(p1) {}
+    BSSRDFProbeSegment(Point3f p0, Point3f p1) : p0(p0), p1(p1) {}
 
     Point3f p0, p1;
 };
@@ -110,7 +110,7 @@ class TabulatedBSSRDF {
     // TabulatedBSSRDF Public Methods
     TabulatedBSSRDF() = default;
     PBRT_CPU_GPU
-    TabulatedBSSRDF(const Point3f &po, const Normal3f &ns, const Vector3f &wo, Float eta,
+    TabulatedBSSRDF(Point3f po, Normal3f ns, Vector3f wo, Float eta,
                     const SampledSpectrum &sigma_a, const SampledSpectrum &sigma_s,
                     const BSSRDFTable *table)
         : po(po), wo(wo), eta(eta), ns(ns), table(table) {
@@ -119,7 +119,7 @@ class TabulatedBSSRDF {
     }
 
     PBRT_CPU_GPU
-    SampledSpectrum Sp(const Point3f &pi) const { return Sr(Distance(po, pi)); }
+    SampledSpectrum Sp(Point3f pi) const { return Sr(Distance(po, pi)); }
 
     PBRT_CPU_GPU
     SampledSpectrum Sr(Float r) const {
@@ -151,7 +151,7 @@ class TabulatedBSSRDF {
 
             Sr[i] = sr;
         }
-        // Transform BSSRDF value into world space units
+        // Transform BSSRDF value into rendering space units
         Sr *= Sqr(sigma_t);
 
         return ClampZero(Sr);
@@ -232,8 +232,8 @@ class TabulatedBSSRDF {
     }
 
     PBRT_CPU_GPU
-    SampledSpectrum PDF_Sp(const Point3f &pi, const Normal3f &ni) const {
-        // Express $\pti-\pto$ and $\bold{n}_i$ with respect to local coordinates at
+    SampledSpectrum PDF_Sp(Point3f pi, Normal3f ni) const {
+        // Express $\pti-\pto$ and $\N{}_\roman{i}$ with respect to local coordinates at
         // $\pto$
         Vector3f d = pi - po;
         Frame f = Frame::FromZ(ns);
@@ -296,11 +296,11 @@ inline pstd::optional<BSSRDFProbeSegment> BSSRDF::SampleSp(Float u1, Point2f u2)
 inline BSSRDFSample BSSRDF::ProbeIntersectionToSample(
     const SubsurfaceInteraction &si, ScratchBuffer &scratchBuffer) const {
     auto pits = [&](auto ptr) {
-        using BxDF = typename std::remove_reference<decltype(*ptr)>::type::BxDF;
+        using BxDF = typename std::remove_reference_t<decltype(*ptr)>::BxDF;
         BxDF *bxdf = (BxDF *)scratchBuffer.Alloc(sizeof(BxDF), alignof(BxDF));
         return ptr->ProbeIntersectionToSample(si, bxdf);
     };
-    return Dispatch(pits);
+    return DispatchCPU(pits);
 }
 
 }  // namespace pbrt

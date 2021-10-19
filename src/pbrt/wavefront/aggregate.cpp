@@ -7,7 +7,7 @@
 #include <pbrt/cpu/aggregates.h>
 #include <pbrt/lights.h>
 #include <pbrt/materials.h>
-#include <pbrt/parsedscene.h>
+#include <pbrt/scene.h>
 #include <pbrt/textures.h>
 #include <pbrt/util/error.h>
 #include <pbrt/util/file.h>
@@ -21,12 +21,12 @@
 namespace pbrt {
 
 CPUAggregate::CPUAggregate(
-    ParsedScene &scene, Allocator alloc, NamedTextures &textures,
+    BasicScene &scene, NamedTextures &textures,
     const std::map<int, pstd::vector<Light> *> &shapeIndexToAreaLights,
     const std::map<std::string, Medium> &media,
     const std::map<std::string, pbrt::Material> &namedMaterials,
     const std::vector<pbrt::Material> &materials) {
-    aggregate = scene.CreateAggregate(alloc, textures, shapeIndexToAreaLights, media,
+    aggregate = scene.CreateAggregate(textures, shapeIndexToAreaLights, media,
                                       namedMaterials, materials);
 }
 
@@ -42,6 +42,10 @@ void CPUAggregate::IntersectClosest(int maxRays, const RayQueue *rayQueue,
     ParallelFor(0, rayQueue->Size(), [=](int index) {
         const RayWorkItem r = (*rayQueue)[index];
         // Intersect _r_'s ray with the scene and enqueue resulting work
+        if (!aggregate) {
+            EnqueueWorkAfterMiss(r, mediumSampleQueue, escapedRayQueue);
+            return;
+        }
         pstd::optional<ShapeIntersection> si = aggregate.Intersect(r.ray);
         if (!si)
             EnqueueWorkAfterMiss(r, mediumSampleQueue, escapedRayQueue);
@@ -59,7 +63,7 @@ void CPUAggregate::IntersectShadow(int maxRays, ShadowRayQueue *shadowRayQueue,
     ParallelFor(0, shadowRayQueue->Size(), [=](int index) {
         const ShadowRayWorkItem w = (*shadowRayQueue)[index];
         bool hit = aggregate.IntersectP(w.ray, w.tMax);
-        RecordShadowRayIntersection(w, pixelSampleState, hit);
+        RecordShadowRayResult(w, pixelSampleState, hit);
     });
 }
 
@@ -104,7 +108,7 @@ void CPUAggregate::IntersectOneRandom(
         }
 
         if (wrs.HasSample()) {
-            subsurfaceScatterQueue->reservoirPDF[index] = wrs.SamplePDF();
+            subsurfaceScatterQueue->reservoirPDF[index] = wrs.SampleProbability();
             subsurfaceScatterQueue->ssi[index] = wrs.GetSample();
         } else
             subsurfaceScatterQueue->reservoirPDF[index] = 0;

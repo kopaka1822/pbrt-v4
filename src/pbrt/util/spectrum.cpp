@@ -41,7 +41,7 @@ Float SpectrumToPhotometric(Spectrum s) {
     // RGB separately for the purposes of target power/illuminance computation
     // in the lights themselves (but we currently don't)
     if (s.Is<RGBIlluminantSpectrum>())
-        s = s.Cast<RGBIlluminantSpectrum>()->Illluminant();
+        s = s.Cast<RGBIlluminantSpectrum>()->Illuminant();
 
     Float y = 0;
     for (Float lambda = Lambda_min; lambda <= Lambda_max; ++lambda)
@@ -114,7 +114,7 @@ pstd::optional<Spectrum> PiecewiseLinearSpectrum::Read(const std::string &fn,
             Warning("%s: extra value found in spectrum file.", fn);
             return {};
         }
-        std::vector<Float> lambda, v;
+        pstd::vector<Float> lambda, v;
         for (size_t i = 0; i < vals.size() / 2; ++i) {
             if (i > 0 && vals[2 * i] <= lambda.back()) {
                 Warning("%s: spectrum file invalid: at %d'th entry, "
@@ -134,7 +134,7 @@ PiecewiseLinearSpectrum *PiecewiseLinearSpectrum::FromInterleaved(
     pstd::span<const Float> samples, bool normalize, Allocator alloc) {
     CHECK_EQ(0, samples.size() % 2);
     int n = samples.size() / 2;
-    std::vector<Float> lambda, v;
+    pstd::vector<Float> lambda, v;
 
     // Extend samples to cover range of visible wavelengths if needed.
     if (samples[0] > Lambda_min) {
@@ -231,23 +231,19 @@ RGB SampledSpectrum::ToRGB(const SampledWavelengths &lambda,
     return cs.ToRGB(xyz);
 }
 
-RGBAlbedoSpectrum::RGBAlbedoSpectrum(const RGBColorSpace &cs, const RGB &rgb) {
+RGBAlbedoSpectrum::RGBAlbedoSpectrum(const RGBColorSpace &cs, RGB rgb) {
     DCHECK_LE(std::max({rgb.r, rgb.g, rgb.b}), 1);
     DCHECK_GE(std::min({rgb.r, rgb.g, rgb.b}), 0);
     rsp = cs.ToRGBCoeffs(rgb);
 }
 
-RGBUnboundedSpectrum::RGBUnboundedSpectrum(const RGBColorSpace &cs, const RGB &rgb) {
+RGBUnboundedSpectrum::RGBUnboundedSpectrum(const RGBColorSpace &cs, RGB rgb) {
     Float m = std::max({rgb.r, rgb.g, rgb.b});
-    if (m <= 1)
-        rsp = cs.ToRGBCoeffs(rgb);
-    else {
-        scale = 2 * m;
-        rsp = cs.ToRGBCoeffs(scale ? rgb / scale : RGB(0, 0, 0));
-    }
+    scale = 2 * m;
+    rsp = cs.ToRGBCoeffs(scale ? rgb / scale : RGB(0, 0, 0));
 }
 
-RGBIlluminantSpectrum::RGBIlluminantSpectrum(const RGBColorSpace &cs, const RGB &rgb)
+RGBIlluminantSpectrum::RGBIlluminantSpectrum(const RGBColorSpace &cs, RGB rgb)
     : illuminant(&cs.illuminant) {
     Float m = std::max({rgb.r, rgb.g, rgb.b});
     scale = 2 * m;
@@ -264,7 +260,8 @@ std::string RGBUnboundedSpectrum::ToString() const {
 
 std::string RGBIlluminantSpectrum::ToString() const {
     return StringPrintf("[ RGBIlluminantSpectrum: rsp: %s scale: %f illuminant: %s ]",
-                        rsp, scale, *illuminant);
+                        rsp, scale,
+                        illuminant ? illuminant->ToString() : std::string("(nullptr)"));
 }
 
 namespace {

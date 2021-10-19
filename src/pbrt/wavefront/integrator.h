@@ -25,7 +25,7 @@
 
 namespace pbrt {
 
-class ParsedScene;
+class BasicScene;
 
 // WavefrontAggregate Definition
 class WavefrontAggregate {
@@ -83,7 +83,8 @@ class WavefrontPathIntegrator {
 
     void UpdateFilm();
 
-    WavefrontPathIntegrator(Allocator alloc, ParsedScene &scene);
+    WavefrontPathIntegrator(pstd::pmr::memory_resource *memoryResource,
+                            BasicScene &scene);
 
     template <typename F>
     void ParallelFor(const char *description, int nItems, F &&func) {
@@ -133,6 +134,8 @@ class WavefrontPathIntegrator {
         pstd::vector<uint64_t> indirectRays, shadowRays;
     };
     Stats *stats;
+
+    pstd::pmr::memory_resource *memoryResource;
 
     Filter filter;
     Film film;

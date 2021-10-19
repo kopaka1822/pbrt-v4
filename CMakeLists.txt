@@ -14,7 +14,9 @@ list (INSERT CMAKE_MODULE_PATH 0 "${CMAKE_SOURCE_DIR}/cmake")
 
 option (PBRT_FLOAT_AS_DOUBLE "Use 64-bit floats" OFF)
 option (PBRT_BUILD_NATIVE_EXECUTABLE "Build executable optimized for CPU architecture of system pbrt was built on" ON)
+option (PBRT_DBG_LOGGING "Enable (very verbose!) debug logging" OFF)
 option (PBRT_NVTX "Insert NVTX annotations for NVIDIA Profiling and Debugging Tools" OFF)
+option (PBRT_NVML "Use NVML for GPU performance measurement" OFF)
 option (PBRT_USE_PREGENERATED_RGB_TO_SPECTRUM_TABLES "Use pregenerated rgbspectrum_*.cpp files rather than running rgb2spec_opt to generate them at build time" OFF)
 set (PBRT_OPTIX7_PATH "" CACHE PATH "Path to OptiX 7 SDK")
 set (PBRT_GPU_SHADER_MODEL "" CACHE STRING "")
@@ -29,7 +31,8 @@ endif ()
 function (CHECK_EXT NAME DIR HASH)
   if (NOT IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/ext/${DIR}")
     message (FATAL_ERROR "The ${NAME} submodule directory is missing! "
-      "You probably did not clone the project with --recursive. It is possible to recover by running:\n"
+      "Either that submodule was recently added to pbrt or you did not clone the project with --recursive. "
+      "In order to update the submodules, run:\n"
       "  \"git submodule update --init --recursive\"")
   endif ()
 
@@ -55,11 +58,12 @@ function (CHECK_EXT NAME DIR HASH)
 endfunction ()
 
 check_ext ("OpenEXR" "openexr/OpenEXR" 5cfb5dab6dfada731586b0281bdb15ee75e26782)
+check_ext ("OpenVDB" "openvdb/nanovdb" 1c306bcaf7e9f7d52525bab716202bd4f7fff5d1)
 check_ext ("Ptex" "ptex/src" 4cd8e9a6db2b06e478dfbbd8c26eb6df97f84483)
 check_ext ("double-conversion" "double-conversion/cmake" cc1f75a114aca8d2af69f73a5a959aecbab0e87a)
 check_ext ("filesystem" "filesystem/filesystem" f45da753728cde9b1c380b343e41c8b1ca6498d7)
+check_ext ("libdeflate" "libdeflate/common" 1fd0bea6ca2073c68493632dafc4b1ddda1bcbc3)
 check_ext ("stb" "stb/tools" b42009b3b9d4ca35bc703f5310eedc74f584be58)
-check_ext ("OpenVDB" "openvdb/nanovdb" 1c306bcaf7e9f7d52525bab716202bd4f7fff5d1)
 check_ext ("zlib" "zlib/doc" 54d591eabf9fe0e84c725638f8d5d8d202a093fa)
 
 add_compile_definitions ("$<$<CONFIG:DEBUG>:PBRT_DEBUG_BUILD>")
@@ -73,10 +77,14 @@ set_property (GLOBAL PROPERTY USE_FOLDERS ON)
 
 if (MSVC)
   list (APPEND PBRT_DEFINITIONS "PBRT_IS_MSVC" "_CRT_SECURE_NO_WARNINGS")
+  list (APPEND PBRT_DEFINITIONS "PBRT_IS_MSVC" "_ENABLE_EXTENDED_ALIGNED_STORAGE")
 endif ()
 
 if (PBRT_FLOAT_AS_DOUBLE)
   list (APPEND PBRT_DEFINITIONS "PBRT_FLOAT_AS_DOUBLE")
+endif ()
+if (PBRT_DBG_LOGGING)
+  list (APPEND PBRT_DEFINITIONS "PBRT_DBG_LOGGING")
 endif ()
 
 #######################################
@@ -176,6 +184,9 @@ of CUDA installed, please update your PATH.")
         if (PBRT_NVTX)
             list (APPEND PBRT_DEFINITIONS "NVTX")
         endif ()
+        if (PBRT_NVML)
+            list (APPEND PBRT_DEFINITIONS "PBRT_USE_NVML")
+        endif ()
         set (PBRT_CUDA_ENABLED ON)
 
         # FIXME
@@ -271,11 +282,16 @@ of CUDA installed, please update your PATH.")
         macro (cuda_compile_and_embed output_var cuda_file lib_name)
           add_library ("${lib_name}" OBJECT "${cuda_file}")
           set_property (TARGET "${lib_name}" PROPERTY CUDA_PTX_COMPILATION ON)
-          target_compile_options ("${lib_name}"
-            PRIVATE
-                # disable "extern declaration... is treated as a static definition" warning
-                -Xcudafe=--display_error_number -Xcudafe=--diag_suppress=3089
-                )
+
+          # disable "extern declaration... is treated as a static definition" warning
+          if (CUDA_VERSION_MAJOR EQUAL 11 AND CUDA_VERSION_MINOR LESS 2)
+              target_compile_options ("${lib_name}" PRIVATE
+                                      -Xcudafe=--display_error_number -Xcudafe=--diag_suppress=3089)
+          else ()
+              target_compile_options ("${lib_name}" PRIVATE
+                                      -Xcudafe=--display_error_number -Xcudafe=--diag_suppress=20044)
+          endif ()
+
           # CUDA integration in Visual Studio seems broken as even if "Use
           # Host Preprocessor Definitions" is checked, the host preprocessor
           # definitions are still not used when compiling device code.
@@ -499,11 +515,11 @@ set (PBRT_SOURCE
   src/pbrt/media.cpp
   src/pbrt/options.cpp
   src/pbrt/paramdict.cpp
-  src/pbrt/parsedscene.cpp
   src/pbrt/parser.cpp
   src/pbrt/pbrt.cpp
   src/pbrt/ray.cpp
   src/pbrt/samplers.cpp
+  src/pbrt/scene.cpp
   src/pbrt/shapes.cpp
   src/pbrt/textures.cpp
 
@@ -524,12 +540,12 @@ set (PBRT_SOURCE_HEADERS
   src/pbrt/media.h
   src/pbrt/options.h
   src/pbrt/paramdict.h
-  src/pbrt/parsedscene.h
   src/pbrt/parser.h
   src/pbrt/pbrt.h
   src/pbrt/pbrt.soa
   src/pbrt/ray.h
   src/pbrt/samplers.h
+  src/pbrt/scene.h
   src/pbrt/shapes.h
   src/pbrt/textures.h
   )  
@@ -811,6 +827,7 @@ target_include_directories (pbrt_lib PUBLIC
   ${STB_INCLUDE}
   ${OPENEXR_INCLUDE}
   ${ZLIB_INCLUDE_DIRS}
+  ${LIBDEFLATE_INCLUDE_DIRS}
   ${FILESYSTEM_INCLUDE}
   ${PTEX_INCLUDE}
   ${DOUBLE_CONVERSION_INCLUDE}
@@ -838,6 +855,7 @@ set (ALL_PBRT_LIBS
   ${OPENEXR_LIBS}
   Ptex_static
   ${ZLIB_LIBRARIES}
+  ${LIBDEFLATE_LIBRARIES}
   double-conversion
   ${PBRT_CUDA_LIB}
 )
@@ -849,7 +867,10 @@ if (PBRT_CUDA_ENABLED)
       )
   add_dependencies (pbrt_embedded_ptx_lib pbrt_soa_generated)
   list (APPEND ALL_PBRT_LIBS pbrt_embedded_ptx_lib)
-endif()
+  if (PBRT_NVML)
+    list (APPEND ALL_PBRT_LIBS "nvidia-ml")
+  endif ()
+endif ()
 
 if (WIN32)
   list (APPEND ALL_PBRT_LIBS "dbghelp" "wsock32" "ws2_32")
@@ -1011,6 +1032,7 @@ install (TARGETS
   pbrt_exe
   imgtool
   pspec
+  plytool
   cyhair2pbrt
   DESTINATION
   bin
