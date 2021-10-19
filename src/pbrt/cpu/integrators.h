@@ -235,6 +235,38 @@ class PathIntegrator : public RayIntegrator {
     bool regularize;
 };
 
+// RestirIntegrator Definition
+class RestirIntegrator : public RayIntegrator {
+  public:
+    // PathIntegrator Public Methods
+    RestirIntegrator(int maxDepth, Camera camera, Sampler sampler, Primitive aggregate,
+                   std::vector<Light> lights,
+                   const std::string &lightSampleStrategy = "bvh",
+                   bool regularize = false);
+
+    SampledSpectrum Li(RayDifferential ray, SampledWavelengths &lambda, Sampler sampler,
+                       ScratchBuffer &scratchBuffer,
+                       VisibleSurface *visibleSurface) const;
+
+    static std::unique_ptr<RestirIntegrator> Create(const ParameterDictionary &parameters,
+                                                  Camera camera, Sampler sampler,
+                                                  Primitive aggregate,
+                                                  std::vector<Light> lights,
+                                                  const FileLoc *loc);
+
+    std::string ToString() const;
+
+  private:
+    // PathIntegrator Private Methods
+    SampledSpectrum SampleLd(const SurfaceInteraction &intr, const BSDF *bsdf,
+                             SampledWavelengths &lambda, Sampler sampler) const;
+
+    // PathIntegrator Private Members
+    int maxDepth;
+    LightSampler lightSampler;
+    bool regularize;
+};
+
 // SimpleVolPathIntegrator Definition
 class SimpleVolPathIntegrator : public RayIntegrator {
   public:
