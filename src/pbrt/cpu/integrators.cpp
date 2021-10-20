@@ -980,8 +980,6 @@ SampledSpectrum RestirIntegrator::SampleLd(const SurfaceInteraction &intr, const
         pstd::optional<LightLiSample> sample;
         SampledSpectrum f; // BSDF multiplied with light color
         LightType type;
-        //Float p_l; // probability for choosing this light
-        Vector3f w_i; // incomming direction
     };
     RestirReservoir<ReservoirLight> rs;
     const auto rsRng = sampler.Get1D();
@@ -1011,8 +1009,6 @@ SampledSpectrum RestirIntegrator::SampleLd(const SurfaceInteraction &intr, const
             ls,
             fdotL,
             light.Type(),
-            //p_l,
-            wi,
         }, rsRng, /*target pdf*/ fdotL.Average(), /*inv source pdf*/ 1.0f / p_l);
     }
 
@@ -1029,7 +1025,7 @@ SampledSpectrum RestirIntegrator::SampleLd(const SurfaceInteraction &intr, const
     if (IsDeltaLight(finalSample.type))
         return finalSample.f / sample_pdf;
     else {
-        Float p_b = bsdf->PDF(intr.wo, finalSample.w_i);
+        Float p_b = bsdf->PDF(intr.wo, finalSample.sample->wi);
         Float w_l = PowerHeuristic(1, sample_pdf, 1, p_b);
         return w_l * finalSample.f / sample_pdf;
     }

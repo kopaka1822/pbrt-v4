@@ -520,7 +520,10 @@ template<typename T>
 class RestirReservoir
 {
 public:
+    PBRT_CPU_GPU
     RestirReservoir() = default;          
+    
+    PBRT_CPU_GPU
     bool StreamSample(const T& sample, float u, Float targetPdf, Float invSourcePdf)
     {
         float risWeight = targetPdf * invSourcePdf;
@@ -536,6 +539,7 @@ public:
         return selectSample;
     };
     
+    PBRT_CPU_GPU
     void Finalize()
     {
         if(!HasSample()) return;

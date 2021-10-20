@@ -262,6 +262,73 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                     ctx.pi = OffsetRayOrigin(ctx.pi, w.n, wo);
                 else if (IsTransmissive(flags) && IsReflective(flags))
                     ctx.pi = OffsetRayOrigin(ctx.pi, w.n, -wo);
+
+                #define USE_RESTIR
+                #ifdef USE_RESTIR
+                const int RESTIR_INITIAL_LIGHT_SAMPLES = 32;
+
+                struct ReservoirLight
+                {
+                    pstd::optional<LightLiSample> sample;
+                    SampledSpectrum Ld; // BSDF multiplied with light color
+                    LightType type;
+                };
+                RestirReservoir<ReservoirLight> rs;
+                const auto rsRng = raySamples.indirect.uc; // abuse this random variable for now (since it is not correlated with direct samples for now)
+
+                for(int i = 0; i < RESTIR_INITIAL_LIGHT_SAMPLES; ++i)
+                {
+                    pstd::optional<SampledLight> sampledLight =
+                        lightSampler.Sample(ctx, raySamples.direct.uc);
+                    if (!sampledLight)
+                        continue; // TODO probaly return?
+                    Light light = sampledLight->light;
+
+                    // Sample light source and evaluate BSDF for direct lighting
+                    pstd::optional<LightLiSample> ls =
+                        light.SampleLi(ctx, raySamples.direct.u, lambda, true);
+                    if (!ls || !ls->L || ls->pdf == 0)
+                        continue;
+                    Vector3f wi = ls->wi;
+                    SampledSpectrum f = bsdf.f<ConcreteBxDF>(wo, wi);
+                    if (!f)
+                        continue;
+
+                    // Compute path throughput and path PDFs for light sample
+                    SampledSpectrum beta = w.beta * f * AbsDot(wi, ns); 
+
+                    Float lightPDF = ls->pdf * sampledLight->p;
+                    // final (unshadowed) color
+                    SampledSpectrum Ld = beta * ls->L;
+
+                    rs.StreamSample(ReservoirLight{
+                        ls,
+                        Ld,
+                        light.Type(),
+                    }, rsRng, Ld.Average(), 1.0f / lightPDF);
+                }
+                
+                // obtain final sample
+                if(!rs.HasSample()) return;
+                rs.Finalize();
+
+                ReservoirLight finalSample = rs.GetSample();
+                const Float sample_pdf = rs.SampleProbability();
+
+                // Enqueue shadow ray with tentative radiance contribution
+                Ray ray = SpawnRayTo(w.pi, w.n, w.time, finalSample.sample->pLight.pi, finalSample.sample->pLight.n);
+                // Initialize _ray_ medium if media are present
+                if (haveMedia)
+                    ray.medium = Dot(ray.d, w.n) > 0 ? w.mediumInterface.outside
+                                                        : w.mediumInterface.inside;
+                Float bsdfPDF =
+                    IsDeltaLight(finalSample.type) ? 0.f : bsdf.PDF<ConcreteBxDF>(wo, finalSample.sample->wi);
+                SampledSpectrum inv_w_u = w.inv_w_u * bsdfPDF;
+                SampledSpectrum inv_w_l = w.inv_w_u * sample_pdf;
+
+                shadowRayQueue->Push(ShadowRayWorkItem{ray, 1 - ShadowEpsilon, lambda, finalSample.Ld,
+                                                       inv_w_u, inv_w_l, w.pixelIndex});
+                #else
                 pstd::optional<SampledLight> sampledLight =
                     lightSampler.Sample(ctx, raySamples.direct.uc);
                 if (!sampledLight)
@@ -317,6 +384,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                          SafeDiv(beta, inv_w_u)[3], SafeDiv(Ld, inv_w_u)[0],
                          SafeDiv(Ld, inv_w_u)[1], SafeDiv(Ld, inv_w_u)[2],
                          SafeDiv(Ld, inv_w_u)[3]);
+                #endif // USE_RESTIR
             }
         });
 }
