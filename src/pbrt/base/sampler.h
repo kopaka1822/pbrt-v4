@@ -58,6 +58,7 @@ class Sampler
     PBRT_CPU_GPU inline Point2f Get2D();
 
     PBRT_CPU_GPU inline Point2f GetPixel2D();
+    PBRT_CPU_GPU inline Point2i GetCurrentPixelIndex();
 
     Sampler Clone(Allocator alloc = {});
 

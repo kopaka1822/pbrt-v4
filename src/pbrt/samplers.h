@@ -51,6 +51,7 @@ class HaltonSampler {
 
     PBRT_CPU_GPU
     void StartPixelSample(Point2i p, int sampleIndex, int dim) {
+        pixel = p;
         haltonIndex = 0;
         int sampleStride = baseScales[0] * baseScales[1];
         // Compute Halton sample index for first sample in pixel _p_
@@ -69,6 +70,8 @@ class HaltonSampler {
         haltonIndex += sampleIndex * sampleStride;
         dimension = std::max(2, dim);
     }
+
+    PBRT_CPU_GPU inline Point2i GetCurrentPixelIndex() {return pixel;}
 
     PBRT_CPU_GPU
     Float Get1D() {
@@ -138,6 +141,7 @@ class HaltonSampler {
     int multInverse[2];
     int64_t haltonIndex = 0;
     int dimension = 0;
+    Point2i pixel;
 };
 
 // PaddedSobolSampler Definition
@@ -166,6 +170,8 @@ class PaddedSobolSampler {
         sampleIndex = index;
         dimension = dim;
     }
+
+    PBRT_CPU_GPU inline Point2i GetCurrentPixelIndex() {return pixel;}
 
     PBRT_CPU_GPU
     Float Get1D() {
@@ -250,9 +256,12 @@ class ZSobolSampler {
 
     PBRT_CPU_GPU
     void StartPixelSample(Point2i p, int index, int dim) {
+        pixel = p;
         dimension = dim;
         mortonIndex = (EncodeMorton2(p.x, p.y) << log2SamplesPerPixel) | index;
     }
+
+    PBRT_CPU_GPU inline Point2i GetCurrentPixelIndex() {return pixel;}
 
     PBRT_CPU_GPU
     Float Get1D() {
@@ -361,6 +370,7 @@ class ZSobolSampler {
     int seed, log2SamplesPerPixel, nBase4Digits;
     uint64_t mortonIndex;
     int dimension;
+    Point2i pixel;
 };
 
 // PMJ02BNSampler Definition
@@ -383,6 +393,8 @@ class PMJ02BNSampler {
         sampleIndex = index;
         dimension = std::max(2, dim);
     }
+
+    PBRT_CPU_GPU inline Point2i GetCurrentPixelIndex() {return pixel;}
 
     PBRT_CPU_GPU
     Float Get1D() {
@@ -455,9 +467,12 @@ class IndependentSampler {
 
     PBRT_CPU_GPU
     void StartPixelSample(Point2i p, int sampleIndex, int dimension) {
+        pixel = p;
         rng.SetSequence(Hash(p, seed));
         rng.Advance(sampleIndex * 65536 + dimension);
     }
+
+    PBRT_CPU_GPU inline Point2i GetCurrentPixelIndex() {return pixel;}
 
     PBRT_CPU_GPU
     Float Get1D() { return rng.Uniform<Float>(); }
@@ -473,6 +488,7 @@ class IndependentSampler {
     // IndependentSampler Private Members
     int samplesPerPixel, seed;
     RNG rng;
+    Point2i pixel;
 };
 
 // SobolSampler Definition
@@ -504,6 +520,8 @@ class SobolSampler {
         dimension = std::max(2, dim);
         sobolIndex = SobolIntervalToIndex(Log2Int(scale), sampleIndex, pixel);
     }
+
+    PBRT_CPU_GPU inline Point2i GetCurrentPixelIndex() {return pixel;}
 
     PBRT_CPU_GPU
     Float Get1D() {
@@ -591,6 +609,8 @@ class StratifiedSampler {
         rng.Advance(sampleIndex * 65536 + dimension);
     }
 
+    PBRT_CPU_GPU inline Point2i GetCurrentPixelIndex() {return pixel;}
+
     PBRT_CPU_GPU
     Float Get1D() {
         // Compute _stratum_ index for current pixel and dimension
@@ -659,9 +679,12 @@ class MLTSampler {
 
     PBRT_CPU_GPU
     void StartPixelSample(Point2i p, int sampleIndex, int dim) {
+        pixel = p;
         rng.SetSequence(Hash(p));
         rng.Advance(sampleIndex * 65536 + dim * 8192);
     }
+
+    PBRT_CPU_GPU inline Point2i GetCurrentPixelIndex() {return pixel;}
 
     PBRT_CPU_GPU
     Float Get1D();
@@ -730,6 +753,7 @@ class MLTSampler {
     bool largeStep = true;
     int64_t lastLargeStepIteration = 0;
     int streamIndex, sampleIndex;
+    Point2i pixel;
 };
 
 class DebugMLTSampler : public MLTSampler {
@@ -789,6 +813,11 @@ inline Point2f Sampler::Get2D() {
 
 inline Point2f Sampler::GetPixel2D() {
     auto get = [&](auto ptr) { return ptr->GetPixel2D(); };
+    return Dispatch(get);
+}
+
+inline Point2i Sampler::GetCurrentPixelIndex() {
+    auto get = [&](auto ptr) { return ptr->GetCurrentPixelIndex(); };
     return Dispatch(get);
 }
 
