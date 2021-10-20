@@ -74,6 +74,9 @@ class Integrator {
                 infiniteLights.push_back(light);
         }
     }
+
+    // Called before the next iteration starts. Can return false to safely abort rendering and saving the image as it is
+    virtual bool PrepareNextIteration() {return true;}
 };
 
 // ImageTileIntegrator Definition
@@ -237,6 +240,20 @@ class PathIntegrator : public RayIntegrator {
 
 // RestirIntegrator Definition
 class RestirIntegrator : public RayIntegrator {
+    struct ReservoirLightBase
+    {
+        Light light;
+        Point2f u; // sample position
+    };
+
+    // interal structs
+    struct ReservoirLight
+    {
+        ReservoirLightBase base;
+        pstd::optional<LightLiSample> sample;
+        SampledSpectrum f; // BSDF multiplied with light color
+        LightType type;
+    };
   public:
     // RestirIntegrator Public Methods
     RestirIntegrator(int maxDepth, Camera camera, Sampler sampler, Primitive aggregate,
@@ -256,15 +273,28 @@ class RestirIntegrator : public RayIntegrator {
 
     std::string ToString() const;
 
+  protected:
+    bool PrepareNextIteration() override;
+
   private:
+    size_t pixelToIndex(Point2i pixel) const
+    {
+        return size_t(pixel.y) * size_t(screenSize.x) + size_t(pixel.x);
+    }
+
     // RestirIntegrator Private Methods
     SampledSpectrum SampleLd(const SurfaceInteraction &intr, const BSDF *bsdf,
-                             SampledWavelengths &lambda, Sampler sampler) const;
+                             SampledWavelengths &lambda, Sampler sampler, int depth) const;
 
     // RestirIntegrator Private Members
     int maxDepth;
     LightSampler lightSampler;
     bool regularize;
+
+    // temporal resampling
+    mutable std::array<std::vector<RestirReservoir<ReservoirLightBase>>, 2> temporalReservoirs;
+    int activeReservoir = 0; // either 0 or 1
+    Point2i screenSize;
 };
 
 // SimpleVolPathIntegrator Definition

@@ -519,10 +519,21 @@ class VarianceEstimator {
 template<typename T>
 class RestirReservoir
 {
+    template<class U>
+    friend class RestirReservoir;
 public:
     PBRT_CPU_GPU
-    RestirReservoir() = default;          
-    
+    //RestirReservoir() = default;          
+    RestirReservoir(){}
+
+    // keep reservoir weights but swap out payload (useful for 'upgrading' or 'downgrading' payload data)
+    template<typename U>
+    PBRT_CPU_GPU RestirReservoir(const RestirReservoir<U>& r, T newSample)
+        :
+    M(r.M), age(r.age), weightSum(r.weightSum), curTargetPdf(r.curTargetPdf), finalSampleWeight(r.finalSampleWeight),
+    curSample(newSample)
+    {}
+
     PBRT_CPU_GPU
     bool StreamSample(const T& sample, float u, Float targetPdf, Float invSourcePdf)
     {
@@ -542,8 +553,33 @@ public:
     PBRT_CPU_GPU
     void Finalize()
     {
-        if(!HasSample()) return;
         finalSampleWeight = weightSum / (curTargetPdf * M);
+    }
+
+    PBRT_CPU_GPU 
+    bool CombineWith(const RestirReservoir<T>& a, float u)
+    {
+        M += a.M;
+        weightSum += a.weightSum;
+        bool selectSample = (u * weightSum < a.weightSum);
+        if(selectSample)
+        {
+            curSample = a.curSample;
+            curTargetPdf = a.curTargetPdf;
+            age = a.age;
+        }
+        return selectSample;
+    }
+
+    PBRT_CPU_GPU
+    void RescaleTargetPdf(float newTargetPdf)
+    {
+        if(!HasSample()) return;
+
+        float ratio = newTargetPdf / curTargetPdf;
+        weightSum *= ratio;
+        // final weight stays the same
+        curTargetPdf = newTargetPdf;
     }
 
     PBRT_CPU_GPU
@@ -557,8 +593,21 @@ public:
     }
     PBRT_CPU_GPU
     Float WeightSum() const { return curTargetPdf; }
+
+    PBRT_CPU_GPU
+    void DiscardSample()
+    {
+        // discard all weights but keep m for resampling
+        weightSum = 0.0f;
+        M = 0;
+    }
+
+    PBRT_CPU_GPU void IncreaseAge() {age += 1;}
+    PBRT_CPU_GPU uint32_t GetAge() const {return age;}
+    PBRT_CPU_GPU uint32_t NumSamples() const {return M;}
 private:
     uint32_t M = 0;
+    uint32_t age = 0;
     float weightSum = 0.0f;
     float curTargetPdf = 0.0f;
     float finalSampleWeight = 0.0f;

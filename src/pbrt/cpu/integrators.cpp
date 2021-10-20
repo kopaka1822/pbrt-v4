@@ -160,6 +160,8 @@ void ImageTileIntegrator::Render() {
 
     // Render image in waves
     while (waveStart < spp) {
+        // prepare data if required or cancel early
+        if(!PrepareNextIteration()) break;
         // Render current wave's image tiles in parallel
         ParallelFor2D(pixelBounds, [&](Bounds2i tileBounds) {
             // Render image tile given by _tileBounds_
@@ -189,8 +191,9 @@ void ImageTileIntegrator::Render() {
         // Update start and end wave
         waveStart = waveEnd;
         waveEnd = std::min(spp, waveEnd + nextWaveSize);
-        if (!referenceImage)
-            nextWaveSize = std::min(2 * nextWaveSize, 64);
+        // Changed: Keep next wave size constant to 1. Otherwise there will be problems with temporal reuse
+        //if (!referenceImage)
+        //    nextWaveSize = std::min(2 * nextWaveSize, 64);
         if (waveStart == spp)
             progress.Done();
 
@@ -822,7 +825,21 @@ RestirIntegrator::RestirIntegrator(int maxDepth, Camera camera, Sampler sampler,
     : RayIntegrator(camera, sampler, aggregate, lights),
       maxDepth(maxDepth),
       lightSampler(LightSampler::Create(lightSampleStrategy, lights, Allocator())),
-      regularize(regularize) {}
+      regularize(regularize) {
+    // initialize screen sized buffers for reservoirs
+    screenSize = camera.GetFilm().FullResolution();
+    auto numPixels = screenSize.x * screenSize.y;
+    temporalReservoirs[0].resize(numPixels);
+    temporalReservoirs[1].resize(numPixels);
+}
+
+bool RestirIntegrator::PrepareNextIteration()
+{
+    // swap reservoir buffer
+    activeReservoir = 1 - activeReservoir;
+    
+    return true;
+}
 
 SampledSpectrum RestirIntegrator::Li(RayDifferential ray, SampledWavelengths &lambda,
                                    Sampler sampler, ScratchBuffer &scratchBuffer,
@@ -918,7 +935,7 @@ SampledSpectrum RestirIntegrator::Li(RayDifferential ray, SampledWavelengths &la
         // Sample direct illumination from the light sources
         if (IsNonSpecular(bsdf.Flags())) {
             ++totalPaths;
-            SampledSpectrum Ld = SampleLd(isect, &bsdf, lambda, sampler);
+            SampledSpectrum Ld = SampleLd(isect, &bsdf, lambda, sampler, depth);
             if (!Ld)
                 ++zeroRadiancePaths;
             L += beta * Ld;
@@ -962,7 +979,7 @@ SampledSpectrum RestirIntegrator::Li(RayDifferential ray, SampledWavelengths &la
 
 SampledSpectrum RestirIntegrator::SampleLd(const SurfaceInteraction &intr, const BSDF *bsdf,
                                          SampledWavelengths &lambda,
-                                         Sampler sampler) const {
+                                         Sampler sampler, int depth) const {
     // Initialize _LightSampleContext_ for light sampling
     LightSampleContext ctx(intr);
     // Try to nudge the light sampling position to correct side of the surface
@@ -975,12 +992,6 @@ SampledSpectrum RestirIntegrator::SampleLd(const SurfaceInteraction &intr, const
     // TODO pull multiple samples and do reservoir reweighting
     const int RESTIR_INITIAL_LIGHT_SAMPLES = 32;
 
-    struct ReservoirLight
-    {
-        pstd::optional<LightLiSample> sample;
-        SampledSpectrum f; // BSDF multiplied with light color
-        LightType type;
-    };
     RestirReservoir<ReservoirLight> rs;
     const auto rsRng = sampler.Get1D();
 
@@ -1006,21 +1017,120 @@ SampledSpectrum RestirIntegrator::SampleLd(const SurfaceInteraction &intr, const
         
         Float p_l = sampledLight->p * ls->pdf;
         rs.StreamSample(ReservoirLight{
+            ReservoirLightBase{light, uLight},
             ls,
             fdotL,
             light.Type(),
         }, rsRng, /*target pdf*/ fdotL.Average(), /*inv source pdf*/ 1.0f / p_l);
     }
 
-    // obtain final sample
-    if(!rs.HasSample()) return {};
-    rs.Finalize();
-    auto finalSample = rs.GetSample();
-    const auto sample_pdf = rs.SampleProbability();
+    if(rs.HasSample())
+    {
+        // test visibility last
+        if(!Unoccluded(intr, rs.GetSample().sample->pLight))
+            rs.DiscardSample(); // discrad if not visible
+    }
 
-    // test visibility last
-    if(!Unoccluded(intr, finalSample.sample->pLight))
-        return {}; 
+    // spatio temporal resampling for primary hit
+    if(depth == 0)
+    {
+        static const bool TEMPORTAL_RESAMPLING = false;
+        static const bool SPATIAL_RESAMPLING = true;
+        static const bool TEST_FINAL_VISIBILITY = false;
+
+        // load sample from previous frame
+        auto index = pixelToIndex(sampler.GetCurrentPixelIndex());
+        /*if(TEMPORTAL_RESAMPLING)
+        {
+            auto prevSample = temporalReservoirs[1 - activeReservoir][index];
+            prevSample.IncreaseAge();
+            // dont take reservoirs that are too old
+            if(prevSample.GetAge() > 2)
+                prevSample.DiscardSample();
+
+            // TODO potentially reweight prev sample because light position has slightly changed
+            // TODO apply boiling filter when weight is too high
+
+            // combine current and previous sample
+            rs.CombineWith(prevSample, sampler.Get1D());
+            rs.Finalize();
+        }*/
+
+        if(SPATIAL_RESAMPLING)
+        {
+            int spatialSamples = 9;
+            RestirReservoir<ReservoirLight> spatialReservoir;
+
+            //if(!rs.HasSample()) spatialSamples *= 2;
+            // search for samples in the neighborhood
+            const auto sRng = sampler.Get1D();
+            for(int i = 0; i < 9; ++i)
+            {
+                // create random point in polar coordinates (r, theta)
+                float r = 8.0f * sqrtf(sampler.Get1D()) + 1.0f;
+                float theta = sampler.Get1D() * 2.0f * 3.141f;
+                Point2i pixelPos = sampler.GetCurrentPixelIndex() + Point2i(r * cos(theta) + 0.5f, r * sin(theta) + 0.5f);
+                if(pixelPos.x < 0 || pixelPos.y < 0 || pixelPos.x >= screenSize.x || pixelPos.y >= screenSize.y)
+                    continue; // next sample
+
+                auto prevSample = temporalReservoirs[1 - activeReservoir][pixelToIndex(pixelPos)];
+                prevSample.IncreaseAge();
+                if(prevSample.GetAge() > 8) continue; // too old
+
+                if(!prevSample.HasSample()) continue;
+                auto light = prevSample.GetSample().light;
+
+                // obtain probability to sample this light
+                auto p = lightSampler.PMF(ctx, light);
+                if(p == 0)
+                    continue;
+                pstd::optional<LightLiSample> ls = light.SampleLi(ctx, prevSample.GetSample().u, lambda, true);
+                if (!ls || !ls->L || ls->pdf == 0)
+                    continue;
+
+                // Evaluate BSDF for light sample (also premultiply with light color)
+                Vector3f wo = intr.wo, wi = ls->wi;
+                SampledSpectrum fdotL = bsdf->f(wo, wi) * AbsDot(wi, intr.shading.n) * ls->L;
+                Float p_l = p * ls->pdf;
+
+                // adjust reservoir probability
+                prevSample.RescaleTargetPdf(fdotL.Average());
+                if(!prevSample.HasSample())
+                    continue; // color could be black now...
+                    
+                // combine reservoirs
+                spatialReservoir.CombineWith(RestirReservoir<ReservoirLight>(prevSample, 
+                ReservoirLight {
+                    prevSample.GetSample(), // base
+                    ls,
+                    fdotL,
+                    light.Type(),
+                }), sRng);
+            }
+
+            // TODO test if spatial is even visible
+            /*if(spatialReservoir.NumSamples() > 0)
+            {
+                LOG_VERBOSE("Considered %d spatial samples", spatialReservoir.NumSamples());
+            }*/
+
+            if(spatialReservoir.HasSample() && TEST_FINAL_VISIBILITY)
+            {
+                if(!Unoccluded(intr, spatialReservoir.GetSample().sample->pLight))
+                    spatialReservoir.DiscardSample(); // discard if not visible
+            }
+
+            rs.CombineWith(spatialReservoir, sampler.Get1D());
+
+            // store new sample
+            temporalReservoirs[activeReservoir][index] = RestirReservoir<ReservoirLightBase>(rs, rs.GetSample().base);
+        }
+    }
+
+    if(!rs.HasSample()) return {};
+    rs.Finalize(); // needed for correct sample probability
+    auto finalSample = rs.GetSample();
+    auto sample_pdf = rs.SampleProbability();
 
     if (IsDeltaLight(finalSample.type))
         return finalSample.f / sample_pdf;
