@@ -516,6 +516,51 @@ class VarianceEstimator {
     int64_t n = 0;
 };
 
+template<typename T>
+class RestirReservoir
+{
+public:
+    RestirReservoir() = default;          
+    bool StreamSample(const T& sample, float u, Float targetPdf, Float invSourcePdf)
+    {
+        float risWeight = targetPdf * invSourcePdf;
+        // increase sample count
+        M += 1;
+        weightSum += risWeight;
+        bool selectSample = (u * weightSum < risWeight);
+        if(selectSample)
+        {
+            curSample = sample;
+            curTargetPdf = targetPdf;
+        }
+        return selectSample;
+    };
+    
+    void Finalize()
+    {
+        if(!HasSample()) return;
+        finalSampleWeight = weightSum / (curTargetPdf * M);
+    }
+
+    PBRT_CPU_GPU
+    int HasSample() const { return weightSum > 0; }
+    PBRT_CPU_GPU
+    const T &GetSample() const { return curSample; }
+    PBRT_CPU_GPU
+    Float SampleProbability() const { 
+        assert(finalSampleWeight > 0.0f);
+        return 1.0 / finalSampleWeight;
+    }
+    PBRT_CPU_GPU
+    Float WeightSum() const { return curTargetPdf; }
+private:
+    uint32_t M = 0;
+    float weightSum = 0.0f;
+    float curTargetPdf = 0.0f;
+    float finalSampleWeight = 0.0f;
+    T curSample;
+};
+
 // WeightedReservoirSampler Definition
 template <typename T>
 class WeightedReservoirSampler {

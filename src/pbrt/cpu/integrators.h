@@ -238,7 +238,7 @@ class PathIntegrator : public RayIntegrator {
 // RestirIntegrator Definition
 class RestirIntegrator : public RayIntegrator {
   public:
-    // PathIntegrator Public Methods
+    // RestirIntegrator Public Methods
     RestirIntegrator(int maxDepth, Camera camera, Sampler sampler, Primitive aggregate,
                    std::vector<Light> lights,
                    const std::string &lightSampleStrategy = "bvh",
@@ -257,11 +257,11 @@ class RestirIntegrator : public RayIntegrator {
     std::string ToString() const;
 
   private:
-    // PathIntegrator Private Methods
+    // RestirIntegrator Private Methods
     SampledSpectrum SampleLd(const SurfaceInteraction &intr, const BSDF *bsdf,
                              SampledWavelengths &lambda, Sampler sampler) const;
 
-    // PathIntegrator Private Members
+    // RestirIntegrator Private Members
     int maxDepth;
     LightSampler lightSampler;
     bool regularize;

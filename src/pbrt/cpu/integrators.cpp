@@ -864,6 +864,7 @@ SampledSpectrum RestirIntegrator::Li(RayDifferential ray, SampledWavelengths &la
             if (depth == 0 || specularBounce)
                 L += beta * Le;
             else {
+                // TODO adjust weight based on reservoir
                 // Compute MIS weight for area light
                 Light areaLight(si->intr.areaLight);
                 Float lightPDF = lightSampler.PMF(prevIntrCtx, areaLight) *
@@ -971,8 +972,70 @@ SampledSpectrum RestirIntegrator::SampleLd(const SurfaceInteraction &intr, const
     else if (IsTransmissive(flags) && !IsReflective(flags))
         ctx.pi = intr.OffsetRayOrigin(-intr.wo);
 
+    // TODO pull multiple samples and do reservoir reweighting
+    const int RESTIR_INITIAL_LIGHT_SAMPLES = 32;
+
+    struct ReservoirLight
+    {
+        pstd::optional<LightLiSample> sample;
+        SampledSpectrum f; // BSDF multiplied with light color
+        LightType type;
+        //Float p_l; // probability for choosing this light
+        Vector3f w_i; // incomming direction
+    };
+    RestirReservoir<ReservoirLight> rs;
+    const auto rsRng = sampler.Get1D();
+
+    for(int i = 0; i < RESTIR_INITIAL_LIGHT_SAMPLES; ++i)
+    {
+        // Choose a light source for the direct lighting calculation
+        Float u = sampler.Get1D();
+        pstd::optional<SampledLight> sampledLight = lightSampler.Sample(ctx, u);
+        Point2f uLight = sampler.Get2D();
+        if (!sampledLight)
+            continue; // probably return? no lights?
+
+        // Sample a point on the light source for direct lighting
+        Light light = sampledLight->light;
+        DCHECK(light && sampledLight->p > 0);
+        pstd::optional<LightLiSample> ls = light.SampleLi(ctx, uLight, lambda, true);
+        if (!ls || !ls->L || ls->pdf == 0)
+            continue;
+
+        // Evaluate BSDF for light sample (also premultiply with light color)
+        Vector3f wo = intr.wo, wi = ls->wi;
+        SampledSpectrum fdotL = bsdf->f(wo, wi) * AbsDot(wi, intr.shading.n) * ls->L;
+        
+        Float p_l = sampledLight->p * ls->pdf;
+        rs.StreamSample(ReservoirLight{
+            ls,
+            fdotL,
+            light.Type(),
+            //p_l,
+            wi,
+        }, rsRng, /*target pdf*/ fdotL.Average(), /*inv source pdf*/ 1.0f / p_l);
+    }
+
+    // obtain final sample
+    if(!rs.HasSample()) return {};
+    rs.Finalize();
+    auto finalSample = rs.GetSample();
+    const auto sample_pdf = rs.SampleProbability();
+
+    // test visibility last
+    if(!Unoccluded(intr, finalSample.sample->pLight))
+        return {}; 
+
+    if (IsDeltaLight(finalSample.type))
+        return finalSample.f / sample_pdf;
+    else {
+        Float p_b = bsdf->PDF(intr.wo, finalSample.w_i);
+        Float w_l = PowerHeuristic(1, sample_pdf, 1, p_b);
+        return w_l * finalSample.f / sample_pdf;
+    }
+
     // Choose a light source for the direct lighting calculation
-    Float u = sampler.Get1D();
+    /*Float u = sampler.Get1D();
     pstd::optional<SampledLight> sampledLight = lightSampler.Sample(ctx, u);
     Point2f uLight = sampler.Get2D();
     if (!sampledLight)
@@ -999,7 +1062,7 @@ SampledSpectrum RestirIntegrator::SampleLd(const SurfaceInteraction &intr, const
         Float p_b = bsdf->PDF(wo, wi);
         Float w_l = PowerHeuristic(1, p_l, 1, p_b);
         return w_l * ls->L * f / p_l;
-    }
+    }*/
 }
 
 std::string RestirIntegrator::ToString() const {
