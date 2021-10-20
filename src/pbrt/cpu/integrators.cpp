@@ -712,10 +712,6 @@ SampledSpectrum PathIntegrator::Li(RayDifferential ray, SampledWavelengths &lamb
 
         ++totalBSDFs;
 
-        // End path if maximum depth reached
-        if (depth++ == maxDepth)
-            break;
-
         // Sample direct illumination from the light sources
         if (IsNonSpecular(bsdf.Flags())) {
             ++totalPaths;
@@ -724,6 +720,10 @@ SampledSpectrum PathIntegrator::Li(RayDifferential ray, SampledWavelengths &lamb
                 ++zeroRadiancePaths;
             L += beta * Ld;
         }
+
+        // End path if maximum depth reached
+        if (depth++ == maxDepth)
+            break;
 
         // Sample BSDF to get new path direction
         Vector3f wo = -ray.d;
@@ -915,10 +915,6 @@ SampledSpectrum RestirIntegrator::Li(RayDifferential ray, SampledWavelengths &la
 
         ++totalBSDFs;
 
-        // End path if maximum depth reached
-        if (depth++ == maxDepth)
-            break;
-
         // Sample direct illumination from the light sources
         if (IsNonSpecular(bsdf.Flags())) {
             ++totalPaths;
@@ -927,6 +923,10 @@ SampledSpectrum RestirIntegrator::Li(RayDifferential ray, SampledWavelengths &la
                 ++zeroRadiancePaths;
             L += beta * Ld;
         }
+
+        // End path if maximum depth reached
+        if (depth++ == maxDepth)
+            break;
 
         // Sample BSDF to get new path direction
         Vector3f wo = -ray.d;
